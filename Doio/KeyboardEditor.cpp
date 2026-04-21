@@ -1,5 +1,7 @@
 #include "Keytest.h"
+#include "SessionState.h"
 #include "KeyboardEditor.h"
+#include "MacroLibrary.h"
 #include "doio.h"
 #include "Keytest.h"
 #include "imgui.h"
@@ -60,65 +62,125 @@ static std::string SaveFileDialog(const char* title, const char* filter,
 // ─── VK name lookup ──────────────────────────────────────────────────────────
 
 KeyboardEditor::KeyboardEditor() {
-    m_keycodeDb      = BuildKeycodeDatabase();
-    m_keycodeMap     = BuildKeycodeMap();
+    m_keycodeDb = BuildKeycodeDatabase();
+    m_keycodeMap = BuildKeycodeMap();
     m_predefinedSchemes = BuildPredefinedSchemes();
     m_vkDown.assign(256, false);
-
-    // Record app start time for tester timestamps
     m_appStartTime = (float)ImGui::GetTime();
+
+    // ── Build macro library ──────────────────────────────────────────────────
+    m_macroLib = BuildMacroLibrary();
+    m_libCategories.push_back("All");   // index 0 = show everything
+    for (const auto& c : GetLibraryCategories(m_macroLib))
+        m_libCategories.push_back(c);
+
+    // ── Auto-load last session ───────────────────────────────────────────────
+    if (m_session.Load()) {
+        TryAutoLoad(m_session.designPath, m_session.configPath);
+    }
+}
+
+
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SECTION 2 – TryAutoLoad  ( 
+// ════════════════════════════════════════════════════════════════════════════════
+
+// Load design + config from absolute paths without showing a file dialog.
+// Used for session restore.  Silently ignores missing files.
+bool KeyboardEditor::TryAutoLoad(const std::string& designPath,
+    const std::string& configPath)
+{
+    bool ok = false;
+
+    if (!designPath.empty()) {
+        KeyboardLayout tmp;
+        if (LoadDesign(designPath, tmp)) {
+            m_layout = std::move(tmp);
+            m_layoutLoaded = true;
+            m_selectedKey = -1;
+            EnsureLayerSchemes();
+            ok = true;
+        }
+    }
+
+    if (!configPath.empty()) {
+        KeyboardConfig tmp;
+        if (LoadConfig(configPath, tmp)) {
+            m_config = std::move(tmp);
+            m_configLoaded = true;
+            m_configPath = configPath;
+            m_currentLayer = 0;
+            m_selectedKey = -1;
+            m_dirty = false;
+            m_undoStack.clear();
+            m_redoStack.clear();
+            ParseMacrosFromConfig();
+            EnsureLayerSchemes();
+            ok = true;
+        }
+    }
+
+    return ok;
 }
 
 // ─── File operations ─────────────────────────────────────────────────────────
 
 void KeyboardEditor::OpenDesign() {
     auto path = OpenFileDialog("Open Design JSON",
-                               "JSON Files\0*.json\0All Files\0*.*\0");
+        "JSON Files\0*.json\0All Files\0*.*\0");
     if (path.empty()) return;
     KeyboardLayout tmp;
     if (LoadDesign(path, tmp)) {
-        m_layout       = std::move(tmp);
+        m_layout = std::move(tmp);
         m_layoutLoaded = true;
-        m_selectedKey  = -1;
+        m_selectedKey = -1;
         EnsureLayerSchemes();
+        m_session.SaveDesign(path);   // ← persist
     }
 }
 
 void KeyboardEditor::OpenConfig() {
     auto path = OpenFileDialog("Open Config JSON (me.json)",
-                               "JSON Files\0*.json\0All Files\0*.*\0");
+        "JSON Files\0*.json\0All Files\0*.*\0");
     if (path.empty()) return;
     KeyboardConfig tmp;
     if (LoadConfig(path, tmp)) {
-        m_config       = std::move(tmp);
+        m_config = std::move(tmp);
         m_configLoaded = true;
-        m_configPath   = path;
+        m_configPath = path;
         m_currentLayer = 0;
-        m_selectedKey  = -1;
-        m_dirty        = false;
+        m_selectedKey = -1;
+        m_dirty = false;
         m_undoStack.clear();
         m_redoStack.clear();
         ParseMacrosFromConfig();
         EnsureLayerSchemes();
+        m_session.SaveConfig(path);   // ← persist
     }
 }
+
 
 void KeyboardEditor::SaveConfig() {
     if (!m_configLoaded) return;
     SyncMacrosToConfig();
     if (m_configPath.empty()) { SaveConfigAs(); return; }
-    if (::SaveConfig(m_configPath, m_config)) m_dirty = false;
+    if (::SaveConfig(m_configPath, m_config)) {
+        m_dirty = false;
+        m_session.SaveConfig(m_configPath);   // ← persist
+    }
 }
 
 void KeyboardEditor::SaveConfigAs() {
     if (!m_configLoaded) return;
     SyncMacrosToConfig();
     auto path = SaveFileDialog("Save Config JSON",
-                               "JSON Files\0*.json\0All Files\0*.*\0", "json");
+        "JSON Files\0*.json\0All Files\0*.*\0", "json");
     if (path.empty()) return;
     if (::SaveConfig(path, m_config)) {
         m_configPath = path;
-        m_dirty      = false;
+        m_dirty = false;
+        m_session.SaveConfig(path);           // ← persist
     }
 }
 
@@ -703,73 +765,72 @@ void KeyboardEditor::RenderKeycodePanel() {
 // ─── Macro editor ─────────────────────────────────────────────────────────────
 
 void KeyboardEditor::RenderMacroPanel() {
-    // Sync macro count with config (always show at least what config has)
-    if (m_configLoaded && (int)m_macros.size() < m_config.LayerCount()) {
-        ParseMacrosFromConfig();
-    }
-
-    // Top bar: add macro, search
+    // ── Add / remove macros ───────────────────────────────────────────────────
     if (ImGui::Button("+ New Macro")) {
-        MacroEntry e;
-        char nb[32]; snprintf(nb, sizeof(nb), "MACRO%02d", (int)m_macros.size());
-        e.name = nb;
-        m_macros.push_back(e);
-        m_config.macros.push_back("");
-        m_dirty = true;
+        MacroEntry me;
+        char buf[32]; snprintf(buf, sizeof(buf), "MACRO%02d", (int)m_macros.size());
+        me.name = buf;
+        m_macros.push_back(me);
         m_editingMacro = (int)m_macros.size() - 1;
+        m_dirty = true;
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(160.f);
-    ImGui::InputText("Search##msearch", m_macroSearchBuf, sizeof(m_macroSearchBuf));
-
-    if (m_macros.empty()) {
-        ImGui::TextDisabled("No macros yet. Click '+ New Macro'.");
-        return;
-    }
+    ImGui::SetNextItemWidth(180.f);
+    ImGui::InputText("Search##msrch", m_macroSearchBuf, sizeof(m_macroSearchBuf));
 
     ImGui::Separator();
 
-    // ── Left: macro list ──────────────────────────────────────────────────────
-    float listW = 180.f;
-    ImGui::BeginChild("##macrolist", ImVec2(listW, 0), true);
+    // ── Macro list (left pane) ────────────────────────────────────────────────
+    float listH = ImGui::GetContentRegionAvail().y;
+    ImGui::BeginChild("MacroList", ImVec2(200.f, listH), true);
 
-    std::string mSearch(m_macroSearchBuf);
-    std::transform(mSearch.begin(), mSearch.end(), mSearch.begin(), ::tolower);
+    for (int mi = 0; mi < (int)m_macros.size(); ++mi) {
+        MacroEntry& me = m_macros[mi];
 
-    for (int i = 0; i < (int)m_macros.size(); ++i) {
-        MacroEntry& me = m_macros[i];
-
-        // Search filter
-        std::string ln = me.name; std::transform(ln.begin(),ln.end(),ln.begin(),::tolower);
-        if (!mSearch.empty() && ln.find(mSearch) == std::string::npos) continue;
-
-        ImGui::PushID(i);
-        bool selected = (m_editingMacro == i);
-        if (selected) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.3f,0.5f,0.85f,1.f));
-
-        char label[48];
-        snprintf(label, sizeof(label), "%s##mli", me.name.c_str());
-
-        if (ImGui::Selectable(label, selected, ImGuiSelectableFlags_SpanAllColumns)) {
-            m_editingMacro  = i;
-            m_editingAction = -1;
+        // Filter by search
+        if (m_macroSearchBuf[0]) {
+            std::string lc = me.name;
+            std::string srch(m_macroSearchBuf);
+            auto ci = [](unsigned char c) { return (char)tolower(c); };
+            std::transform(lc.begin(), lc.end(), lc.begin(), ci);
+            std::transform(srch.begin(), srch.end(), srch.begin(), ci);
+            if (lc.find(srch) == std::string::npos) continue;
         }
-        if (selected) ImGui::PopStyleColor();
 
-        // Summary tooltip
-        if (ImGui::IsItemHovered()) {
+        ImGui::PushID(mi);
+        bool sel = (m_editingMacro == mi);
+        if (sel) ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.25f, 0.45f, 0.80f, 1.f));
+        if (ImGui::Selectable(me.name.c_str(), sel,
+            ImGuiSelectableFlags_AllowDoubleClick)) {
+            m_editingMacro = mi;
+        }
+        if (sel) ImGui::PopStyleColor();
+
+        // Tooltip: show summary
+        if (ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", MacroSummary(me).c_str());
-        }
 
-        // Delete button on right-click context
-        if (ImGui::BeginPopupContextItem("##mctx")) {
-            if (ImGui::MenuItem("Delete Macro")) {
-                m_macros.erase(m_macros.begin() + i);
-                if (m_configLoaded && i < (int)m_config.macros.size())
-                    m_config.macros.erase(m_config.macros.begin() + i);
-                m_editingMacro  = -1;
-                m_editingAction = -1;
+        // Right-click context: rename / delete
+        if (ImGui::BeginPopupContextItem("MacroCtx")) {
+            static char renameBuf[64] = {};
+            if (ImGui::IsWindowAppearing()) strncpy_s(renameBuf, sizeof(renameBuf), me.name.c_str(), _TRUNCATE);
+            ImGui::SetNextItemWidth(140.f);
+            if (ImGui::InputText("Name##rn", renameBuf, sizeof(renameBuf),
+                ImGuiInputTextFlags_EnterReturnsTrue)) {
+                me.name = renameBuf;
                 m_dirty = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete")) {
+                m_macros.erase(m_macros.begin() + mi);
+                if (m_editingMacro >= (int)m_macros.size())
+                    m_editingMacro = (int)m_macros.size() - 1;
+                m_dirty = true;
+                ImGui::CloseCurrentPopup();
+                ImGui::PopID();
+                ImGui::EndPopup();
+                continue;
             }
             ImGui::EndPopup();
         }
@@ -777,143 +838,127 @@ void KeyboardEditor::RenderMacroPanel() {
         ImGui::PopID();
     }
     ImGui::EndChild();
+
+    // ── Action editor (right pane) ────────────────────────────────────────────
     ImGui::SameLine();
 
-    // ── Right: action editor ──────────────────────────────────────────────────
-    ImGui::BeginChild("##macroedit", ImVec2(0, 0), true);
-
     if (m_editingMacro < 0 || m_editingMacro >= (int)m_macros.size()) {
-        ImGui::TextDisabled("Select a macro from the left.");
+        ImGui::BeginChild("MacroEdit", ImVec2(0, listH), true);
+        ImGui::TextDisabled("Select a macro on the left to edit it.");
         ImGui::EndChild();
         return;
     }
 
     MacroEntry& me = m_macros[m_editingMacro];
 
-    // Name field
-    {
-        char nb[64]; strncpy_s(nb, me.name.c_str(), sizeof(nb)-1);
-        ImGui::SetNextItemWidth(200.f);
-        if (ImGui::InputText("Name##mname", nb, sizeof(nb)))
-            me.name = nb;
-    }
+    ImGui::BeginChild("MacroEdit", ImVec2(0, listH), true);
+    ImGui::Text("Editing: %s", me.name.c_str());
     ImGui::SameLine();
-    ImGui::TextDisabled("(%d actions)", (int)me.actions.size());
+
+    // Duplicate
+    if (ImGui::SmallButton("Duplicate")) {
+        MacroEntry copy = me;
+        char buf[64]; snprintf(buf, sizeof(buf), "%s_copy", me.name.c_str());
+        copy.name = buf;
+        m_macros.insert(m_macros.begin() + m_editingMacro + 1, copy);
+        m_dirty = true;
+    }
     ImGui::Separator();
 
-    // ── Action list table ─────────────────────────────────────────────────────
-    if (ImGui::BeginTable("##actions", 4,
-        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit,
-        ImVec2(0.f, 180.f)))
-    {
-        ImGui::TableSetupColumn("#",       ImGuiTableColumnFlags_WidthFixed, 28.f);
-        ImGui::TableSetupColumn("Type",    ImGuiTableColumnFlags_WidthFixed, 120.f);
-        ImGui::TableSetupColumn("Value",   ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("  ",      ImGuiTableColumnFlags_WidthFixed, 50.f);
-        ImGui::TableHeadersRow();
+    // ── Action list ───────────────────────────────────────────────────────────
+    ImGui::Text("Actions (%d):", (int)me.actions.size());
+    float actionListH = 160.f;  // fixed height, rest goes to library
+    ImGui::BeginChild("##actions", ImVec2(0, actionListH), true);
+    for (int ai = 0; ai < (int)me.actions.size(); ++ai) {
+        MacroAction& a = me.actions[ai];
+        ImGui::PushID(ai);
 
-        for (int ai = 0; ai < (int)me.actions.size(); ++ai) {
-            MacroAction& act = me.actions[ai];
-            ImGui::TableNextRow();
-            ImGui::PushID(ai);
-
-            ImGui::TableSetColumnIndex(0);
-            ImGui::Text("%d", ai+1);
-
-            ImGui::TableSetColumnIndex(1);
-            // Inline type combo
-            ImGui::SetNextItemWidth(-1.f);
-            if (ImGui::BeginCombo("##atype",
-                MacroActionTypeName(act.type), ImGuiComboFlags_NoArrowButton))
-            {
-                for (int t = 0; t < (int)MacroActionType::COUNT; ++t) {
-                    bool sel = ((int)act.type == t);
-                    if (ImGui::Selectable(MacroActionTypeName((MacroActionType)t), sel))
-                        act.type = (MacroActionType)t;
-                    if (sel) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-
-            ImGui::TableSetColumnIndex(2);
-            ImGui::SetNextItemWidth(-1.f);
-            switch (act.type) {
-            case MacroActionType::KeyTap:
-            case MacroActionType::KeyDown:
-            case MacroActionType::KeyUp: {
-                char kbuf[64]; strncpy_s(kbuf, act.keycode.c_str(), sizeof(kbuf)-1);
-                if (ImGui::InputText("##kc", kbuf, sizeof(kbuf))) {
-                    act.keycode = kbuf;
-                    m_dirty = true;
-                }
-                break;
-            }
-            case MacroActionType::TypeString: {
-                char tbuf[256]; strncpy_s(tbuf, act.text.c_str(), sizeof(tbuf)-1);
-                if (ImGui::InputText("##txt", tbuf, sizeof(tbuf))) {
-                    act.text = tbuf;
-                    m_dirty = true;
-                }
-                break;
-            }
-            case MacroActionType::Delay: {
-                if (ImGui::InputInt("##dms", &act.delayMs)) {
-                    if (act.delayMs < 1) act.delayMs = 1;
-                    m_dirty = true;
-                }
-                break;
-            }
-            default: break;
-            }
-
-            ImGui::TableSetColumnIndex(3);
-            // Up / Down / Delete
-            if (ImGui::SmallButton("↑") && ai > 0)
-                std::swap(me.actions[ai], me.actions[ai-1]);
-            ImGui::SameLine();
-            if (ImGui::SmallButton("✕")) {
-                me.actions.erase(me.actions.begin() + ai);
-                m_dirty = true;
-                ImGui::PopID();
-                break; // avoid dangling reference
-            }
-
-            ImGui::PopID();
+        // Up / Down
+        if (ImGui::ArrowButton("##u", ImGuiDir_Up) && ai > 0) {
+            std::swap(me.actions[ai], me.actions[ai - 1]); m_dirty = true;
         }
-        ImGui::EndTable();
+        ImGui::SameLine();
+        if (ImGui::ArrowButton("##d", ImGuiDir_Down) && ai < (int)me.actions.size() - 1) {
+            std::swap(me.actions[ai], me.actions[ai + 1]); m_dirty = true;
+        }
+        ImGui::SameLine();
+
+        // Type label
+        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.f, 1.f), "[%s]",
+            MacroActionTypeName(a.type));
+        ImGui::SameLine();
+
+        // Value
+        switch (a.type) {
+        case MacroActionType::KeyTap:
+        case MacroActionType::KeyDown:
+        case MacroActionType::KeyUp:
+        {
+            char kbuf[64]; strncpy_s(kbuf, a.keycode.c_str(), 63);
+            ImGui::SetNextItemWidth(100.f);
+            if (ImGui::InputText("##kc", kbuf, sizeof(kbuf),
+                ImGuiInputTextFlags_EnterReturnsTrue)) {
+                a.keycode = kbuf; m_dirty = true;
+            }
+            break;
+        }
+        case MacroActionType::TypeString:
+        {
+            char tbuf[256]; strncpy_s(tbuf, sizeof(tbuf), a.text.c_str(), _TRUNCATE);
+            ImGui::SetNextItemWidth(180.f);
+            if (ImGui::InputText("##txt", tbuf, sizeof(tbuf),
+                ImGuiInputTextFlags_EnterReturnsTrue)) {
+                a.text = tbuf; m_dirty = true;
+            }
+            break;
+        }
+        case MacroActionType::Delay:
+        {
+            ImGui::SetNextItemWidth(70.f);
+            if (ImGui::InputInt("ms##dl", &a.delayMs)) {
+                if (a.delayMs < 1) a.delayMs = 1; m_dirty = true;
+            }
+            break;
+        }
+        default: break;
+        }
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("X")) {
+            me.actions.erase(me.actions.begin() + ai);
+            m_dirty = true;
+            ImGui::PopID();
+            continue;
+        }
+        ImGui::PopID();
     }
+    ImGui::EndChild();
 
-    // ── Add action row ────────────────────────────────────────────────────────
-    ImGui::Separator();
-    ImGui::Text("Add action:");
-    ImGui::SameLine();
+    ImGui::Spacing();
 
-    // Type selector
+    // ── Manual add row ────────────────────────────────────────────────────────
+    ImGui::TextDisabled("Add action manually:");
     ImGui::SetNextItemWidth(130.f);
-    if (ImGui::BeginCombo("##natype",
-        MacroActionTypeName(m_newActionType), ImGuiComboFlags_NoArrowButton))
-    {
-        for (int t = 0; t < (int)MacroActionType::COUNT; ++t) {
-            bool sel = ((int)m_newActionType == t);
-            if (ImGui::Selectable(MacroActionTypeName((MacroActionType)t), sel))
+    if (ImGui::BeginCombo("##nat", MacroActionTypeName(m_newActionType))) {
+        for (int t = 0; t < (int)MacroActionType::COUNT; t++) {
+            bool s = ((int)m_newActionType == t);
+            if (ImGui::Selectable(MacroActionTypeName((MacroActionType)t), s))
                 m_newActionType = (MacroActionType)t;
-            if (sel) ImGui::SetItemDefaultFocus();
+            if (s) ImGui::SetItemDefaultFocus();
         }
         ImGui::EndCombo();
     }
     ImGui::SameLine();
-
     switch (m_newActionType) {
     case MacroActionType::KeyTap:
     case MacroActionType::KeyDown:
     case MacroActionType::KeyUp:
-        ImGui::SetNextItemWidth(120.f);
+        ImGui::SetNextItemWidth(100.f);
         ImGui::InputText("##nak", m_newActionKey, sizeof(m_newActionKey));
         break;
     case MacroActionType::TypeString:
         ImGui::SetNextItemWidth(180.f);
-        ImGui::InputText("##nat", m_newActionText, sizeof(m_newActionText));
+        ImGui::InputText("##nat2", m_newActionText, sizeof(m_newActionText));
         break;
     case MacroActionType::Delay:
         ImGui::SetNextItemWidth(80.f);
@@ -923,53 +968,29 @@ void KeyboardEditor::RenderMacroPanel() {
     default: break;
     }
     ImGui::SameLine();
-
     if (ImGui::Button("Add")) {
         MacroAction a;
         a.type = m_newActionType;
         switch (m_newActionType) {
         case MacroActionType::KeyTap:
         case MacroActionType::KeyDown:
-        case MacroActionType::KeyUp:
-            a.keycode = m_newActionKey;
-            break;
-        case MacroActionType::TypeString:
-            a.text = m_newActionText;
-            break;
-        case MacroActionType::Delay:
-            a.delayMs = m_newActionDelay;
-            break;
+        case MacroActionType::KeyUp:   a.keycode = m_newActionKey;   break;
+        case MacroActionType::TypeString: a.text = m_newActionText;  break;
+        case MacroActionType::Delay:   a.delayMs = m_newActionDelay; break;
         default: break;
         }
         me.actions.push_back(a);
         m_dirty = true;
     }
 
-    // ── Quick-insert common keys ──────────────────────────────────────────────
     ImGui::Separator();
-    ImGui::TextDisabled("Quick-insert common keys:");
-    const char* quickKeys[] = {
-        "KC_A","KC_B","KC_C","KC_ENT","KC_SPC","KC_BSPC",
-        "KC_TAB","KC_ESC","KC_LSFT","KC_LCTL","KC_LALT"
-    };
-    for (int qi = 0; qi < (int)(sizeof(quickKeys)/sizeof(quickKeys[0])); ++qi) {
-        ImGui::PushID(qi + 9000);
-        std::string ql = GetKeycodeLabel(quickKeys[qi], m_keycodeMap);
-        if (ImGui::SmallButton(ql.c_str())) {
-            MacroAction a;
-            a.type    = MacroActionType::KeyTap;
-            a.keycode = quickKeys[qi];
-            me.actions.push_back(a);
-            m_dirty = true;
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", quickKeys[qi]);
-        ImGui::PopID();
-        ImGui::SameLine();
-    }
-    ImGui::NewLine();
 
-    ImGui::EndChild();
+    // ── Predefined library picker ─────────────────────────────────────────────
+    RenderMacroLibraryPanel(me);
+
+    ImGui::EndChild();  // MacroEdit
 }
+
 
 // ─── Key Tester ───────────────────────────────────────────────────────────────
 
@@ -1134,4 +1155,167 @@ void KeyboardEditor::RenderStatusBar() {
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
+}
+
+
+
+
+// ════════════════════════════════════════════════════════════════════════════════
+// SECTION 7 – RenderMacroLibraryPanel  ( 
+// ════════════════════════════════════════════════════════════════════════════════
+
+void KeyboardEditor::RenderMacroLibraryPanel(MacroEntry& me) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.11f, 0.16f, 1.f));
+    ImGui::BeginChild("##macrolib", ImVec2(0, 0), true);
+
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.f),
+        "Predefined Action Library");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%d actions) — double-click or press + Add to insert",
+        (int)m_macroLib.size());
+
+    // ── Filter row ────────────────────────────────────────────────────────────
+    ImGui::SetNextItemWidth(140.f);
+    ImGui::InputText("Search##lib", m_libSearchBuf, sizeof(m_libSearchBuf));
+    ImGui::SameLine();
+
+    const char* curCat = (m_libCategoryIdx < (int)m_libCategories.size())
+        ? m_libCategories[m_libCategoryIdx].c_str()
+        : "All";
+    ImGui::SetNextItemWidth(160.f);
+    if (ImGui::BeginCombo("Category##lcat", curCat)) {
+        for (int ci = 0; ci < (int)m_libCategories.size(); ++ci) {
+            bool sel = (ci == m_libCategoryIdx);
+            if (ImGui::Selectable(m_libCategories[ci].c_str(), sel))
+                m_libCategoryIdx = ci;
+            if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    std::string catFilter = (m_libCategoryIdx == 0)
+        ? std::string()
+        : m_libCategories[m_libCategoryIdx];
+    std::string srchFilter(m_libSearchBuf);
+
+    std::vector<const MacroLibraryEntry*> filtered =
+        FilterLibrary(m_macroLib, catFilter, srchFilter);
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d shown", (int)filtered.size());
+    ImGui::Separator();
+
+    // ── Scrollable table ──────────────────────────────────────────────────────
+    ImGuiTableFlags tflags =
+        ImGuiTableFlags_Borders |
+        ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_ScrollY |
+        ImGuiTableFlags_SizingStretchProp;
+
+    if (ImGui::BeginTable("##libtable", 4, tflags)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 110.f);
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 120.f);
+        ImGui::TableSetupColumn("Description", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Insert", ImGuiTableColumnFlags_WidthFixed, 52.f);
+        ImGui::TableHeadersRow();
+
+        for (int fi = 0; fi < (int)filtered.size(); ++fi) {
+            const MacroLibraryEntry& e = *filtered[fi];
+            ImGui::TableNextRow();
+
+            // Category cell — colour by category name hash
+            ImGui::TableSetColumnIndex(0);
+            float hue = 0.f;
+            for (size_t k = 0; k < e.category.size(); ++k)
+                hue = fmodf(hue + (float)(unsigned char)e.category[k] * 0.031f, 1.f);
+            ImVec4 catCol;
+            ImGui::ColorConvertHSVtoRGB(hue, 0.5f, 0.85f,
+                catCol.x, catCol.y, catCol.z);
+            catCol.w = 1.f;
+            ImGui::TextColored(catCol, "%s", e.category.c_str());
+
+            // Action name (selectable spans all columns for hover / dbl-click)
+            ImGui::TableSetColumnIndex(1);
+            ImGui::PushID(fi);
+            bool clicked = ImGui::Selectable(
+                e.name.c_str(), false,
+                ImGuiSelectableFlags_SpanAllColumns |
+                ImGuiSelectableFlags_AllowDoubleClick);
+            bool dblClicked = clicked && ImGui::IsMouseDoubleClicked(0);
+
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 1.f, 1.f), "%s", e.name.c_str());
+                ImGui::TextDisabled("%s", e.description.c_str());
+                ImGui::Separator();
+                ImGui::Text("Type: %s", LibActionTypeName(e.libType));
+                switch (e.libType) {
+                case LibActionType::KeyTap:
+                case LibActionType::KeyDown:
+                case LibActionType::KeyUp:
+                    ImGui::Text("Keycode: %s", e.keycode.c_str());
+                    break;
+                case LibActionType::TypeString:
+                    ImGui::Text("Text: \"%s\"", e.text.c_str());
+                    break;
+                case LibActionType::Delay:
+                    ImGui::Text("Delay: %d ms", e.delayMs);
+                    break;
+                default: break;
+                }
+                ImGui::TextDisabled("Double-click or press + Add");
+                ImGui::EndTooltip();
+            }
+
+            // Description cell
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextDisabled("%s", e.description.c_str());
+
+            // Insert button
+            ImGui::TableSetColumnIndex(3);
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                ImVec4(0.18f, 0.42f, 0.28f, 1.f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                ImVec4(0.25f, 0.62f, 0.40f, 1.f));
+            bool insertBtn = ImGui::SmallButton("+ Add");
+            ImGui::PopStyleColor(2);
+            ImGui::PopID();
+
+            // Convert LibActionType → MacroActionType and append
+            if (dblClicked || insertBtn) {
+                MacroAction a;
+                switch (e.libType) {
+                case LibActionType::KeyTap:
+                    a.type = MacroActionType::KeyTap;
+                    a.keycode = e.keycode;
+                    break;
+                case LibActionType::KeyDown:
+                    a.type = MacroActionType::KeyDown;
+                    a.keycode = e.keycode;
+                    break;
+                case LibActionType::KeyUp:
+                    a.type = MacroActionType::KeyUp;
+                    a.keycode = e.keycode;
+                    break;
+                case LibActionType::TypeString:
+                    a.type = MacroActionType::TypeString;
+                    a.text = e.text;
+                    break;
+                case LibActionType::Delay:
+                    a.type = MacroActionType::Delay;
+                    a.delayMs = e.delayMs;
+                    break;
+                default: break;
+                }
+                me.actions.push_back(a);
+                m_dirty = true;
+            }
+        }
+
+        ImGui::EndTable();
+    }
+
+    ImGui::EndChild();        // ##macrolib
+    ImGui::PopStyleColor();   // ChildBg
 }

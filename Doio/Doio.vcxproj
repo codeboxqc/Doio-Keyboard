@@ -130,7 +130,9 @@
     <ClInclude Include="KeyboardEditor.h" />
     <ClInclude Include="KeycodeDefs.h" />
     <ClInclude Include="Keytest.h" />
+    <ClInclude Include="MacroLibrary.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="SessionState.h" />
     <ClInclude Include="targetver.h" />
   </ItemGroup>
   <ItemGroup>

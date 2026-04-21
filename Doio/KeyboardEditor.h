@@ -1,7 +1,13 @@
 #pragma once
+
+#include "SessionState.h"
+#include "MacroLibrary.h"
+
 #include "KeyboardConfig.h"
 #include "KeycodeDefs.h"
 #include "LedScheme.h"
+
+
 #include <string>
 #include <vector>
 #include <deque>
@@ -9,6 +15,9 @@
 #include <chrono>
 #include <imgui.h>
 
+#include "Keytest.h"
+// ─── Main editor ─────────────────────────────────────────────────────────────
+// 
 // ─── Undo / Redo ─────────────────────────────────────────────────────────────
 
 struct UndoRecord {
@@ -52,8 +61,6 @@ struct MacroEntry {
     std::vector<MacroAction>  actions;
 };
 
-#include "Keytest.h"
-// ─── Main editor ─────────────────────────────────────────────────────────────
 
 class KeyboardEditor {
 public:
@@ -89,6 +96,9 @@ private:
     int  m_selectedKey   = -1;
     bool m_dirty         = false;
 
+    SessionState     m_session;
+    bool TryAutoLoad(const std::string& designPath, const std::string& configPath);
+
     // Keycode database
     std::vector<KeycodeDef>                     m_keycodeDb;
     std::unordered_map<std::string, KeycodeDef> m_keycodeMap;
@@ -119,6 +129,14 @@ private:
     void ParseMacrosFromConfig();
     // Human-readable summary of a MacroEntry
     std::string MacroSummary(const MacroEntry& m) const;
+
+
+    void RenderMacroLibraryPanel(MacroEntry& me);
+
+    std::vector<MacroLibraryEntry> m_macroLib;          
+    char                           m_libSearchBuf[128] = {};   
+    int                            m_libCategoryIdx = 0;    
+    std::vector<std::string>       m_libCategories;            
 
     // ── Key Tester ────────────────────────────────────────────────────────────
     KeyTester                  m_keyTester;
