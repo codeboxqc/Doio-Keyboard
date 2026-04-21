@@ -52,15 +52,7 @@ struct MacroEntry {
     std::vector<MacroAction>  actions;
 };
 
-// ─── Key Tester ──────────────────────────────────────────────────────────────
-
-struct KeyPressEvent {
-    int         vkCode;        // Windows Virtual Key code
-    std::string name;          // printable name
-    bool        isDown;        // true = pressed, false = released
-    float       timestamp;     // seconds since app start
-};
-
+#include "Keytest.h"
 // ─── Main editor ─────────────────────────────────────────────────────────────
 
 class KeyboardEditor {
@@ -129,14 +121,7 @@ private:
     std::string MacroSummary(const MacroEntry& m) const;
 
     // ── Key Tester ────────────────────────────────────────────────────────────
-    bool                       m_testerActive = false;
-    std::vector<bool>          m_vkDown;          // vkDown[vk] = currently held
-    std::deque<KeyPressEvent>  m_keyLog;           // rolling log
-    static const int           kLogMaxSize = 128;
-    // VK → name helper
-    static std::string VkName(int vk);
-    // Poll current keyboard state via GetAsyncKeyState
-    void PollKeyTester();
+    KeyTester                  m_keyTester;
     float m_appStartTime = 0.f; // seconds, set in constructor
 
     // ── LED Schemes ───────────────────────────────────────────────────────────
@@ -150,7 +135,6 @@ private:
     void RenderKeyboardPanel();
     void RenderKeycodePanel();
     void RenderMacroPanel();
-    void RenderKeyTesterPanel();
     void RenderLedSchemePanel();
     void RenderStatusBar();
 
@@ -164,4 +148,8 @@ private:
     // Layer colors (for layer tab buttons, still used)
     static const int   kMaxLayers = 9;
     static const float kLayerColors[kMaxLayers][3];
+
+    // Extra member variable to track virtual key states
+    std::vector<bool> m_vkDown;
+    bool m_testerActive = false; // Tracks if the key tester is active
 };
