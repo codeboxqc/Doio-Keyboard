@@ -42,7 +42,7 @@ struct KeycodeDef {
     std::string code;    // QMK keycode string e.g. "KC_A"
     std::string label;   // Short display label e.g. "A"
     std::string tooltip; // Full description
-    KeyCategory category;
+    KeyCategory category = KeyCategory::Special;
 };
 
 inline std::vector<KeycodeDef> BuildKeycodeDatabase() {

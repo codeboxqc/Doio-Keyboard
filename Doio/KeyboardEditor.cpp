@@ -120,11 +120,6 @@ std::string KeyboardEditor::VkName(int vk) {
     case VK_NUMPAD7:    return "Num7";
     case VK_NUMPAD8:    return "Num8";
     case VK_NUMPAD9:    return "Num9";
-    case VK_DECIMAL:    return "Num.";
-    case VK_DIVIDE:     return "Num/";
-    case VK_MULTIPLY:   return "Num*";
-    case VK_SUBTRACT:   return "Num-";
-    case VK_ADD:        return "Num+";
     case VK_VOLUME_MUTE: return "Mute";
     case VK_VOLUME_DOWN: return "Vol-";
     case VK_VOLUME_UP:   return "Vol+";
