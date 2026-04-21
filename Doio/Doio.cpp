@@ -192,8 +192,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
-    // Load a font slightly larger than default (optional)
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 15.0f);
+    // Load a font slightly larger than default with extended glyph ranges for keyboard symbols
+    static const ImWchar ranges[] = {
+        0x0020, 0x00FF, // Basic Latin + Latin Supplement
+        0x2100, 0x21FF, // Arrows
+        0x2300, 0x23FF, // Miscellaneous Technical
+        0x2500, 0x25FF, // Geometric Shapes
+        0,
+    };
+    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 15.0f, nullptr, ranges);
     io.FontDefault = io.Fonts->Fonts.back();
 
     KeyboardEditor editor;
@@ -253,6 +260,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                     ImGui::Separator();
                     if (ImGui::MenuItem("Save Config", "Ctrl+S", false, editor.CanUndo() || true)) editor.SaveConfig();
                     if (ImGui::MenuItem("Save Config As…", ""))       editor.SaveConfigAs();
+                    if (ImGui::MenuItem("Save to Keyboard Memory", "Ctrl+Shift+S", false, editor.IsConfigLoaded())) editor.SaveToKeyboard();
                     ImGui::Separator();
                     if (ImGui::MenuItem("Exit")) done = true;
                     ImGui::EndMenu();

@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include "LedScheme.h"
 
 // ─── Physical layout (from design.json) ────────────────────────────────────
 
@@ -43,6 +44,7 @@ struct KeyboardConfig {
     uint32_t                              vendorProductId = 0;
     std::vector<std::string>              macros;
     std::vector<std::vector<std::string>> layers; // [layerIdx][flatIdx]
+    std::vector<LedScheme>                ledSchemes; // [layerIdx]
 
     bool IsValid() const { return !layers.empty(); }
     int  LayerCount() const { return (int)layers.size(); }

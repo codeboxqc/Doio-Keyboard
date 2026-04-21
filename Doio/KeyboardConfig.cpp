@@ -117,6 +117,28 @@ bool LoadConfig(const std::string& path, KeyboardConfig& config) {
         }
     }
 
+    config.ledSchemes.clear();
+    if (root.contains("ledSchemes")) {
+        for (const auto& s : root["ledSchemes"]) {
+            LedScheme ls;
+            ls.name = s.value("name", "Custom");
+            ls.type = (LedSchemeType)s.value("type", 0);
+            if (s.contains("primary")) {
+                ls.primary.r = s["primary"].value("r", 1.f);
+                ls.primary.g = s["primary"].value("g", 1.f);
+                ls.primary.b = s["primary"].value("b", 1.f);
+            }
+            if (s.contains("secondary")) {
+                ls.secondary.r = s["secondary"].value("r", 1.f);
+                ls.secondary.g = s["secondary"].value("g", 1.f);
+                ls.secondary.b = s["secondary"].value("b", 1.f);
+            }
+            ls.speed = s.value("speed", 1.f);
+            ls.brightness = s.value("brightness", 1.f);
+            config.ledSchemes.push_back(ls);
+        }
+    }
+
     return config.IsValid();
 }
 
@@ -136,6 +158,18 @@ bool SaveConfig(const std::string& path, const KeyboardConfig& config) {
         json arr = json::array();
         for (const auto& kc : layer) arr.push_back(kc);
         root["layers"].push_back(arr);
+    }
+
+    root["ledSchemes"] = json::array();
+    for (const auto& ls : config.ledSchemes) {
+        json s;
+        s["name"] = ls.name;
+        s["type"] = (int)ls.type;
+        s["primary"] = {{"r", ls.primary.r}, {"g", ls.primary.g}, {"b", ls.primary.b}};
+        s["secondary"] = {{"r", ls.secondary.r}, {"g", ls.secondary.g}, {"b", ls.secondary.b}};
+        s["speed"] = ls.speed;
+        s["brightness"] = ls.brightness;
+        root["ledSchemes"].push_back(s);
     }
 
     std::ofstream f(path);

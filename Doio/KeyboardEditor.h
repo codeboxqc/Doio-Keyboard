@@ -72,8 +72,10 @@ public:
     void OpenConfig();
     void SaveConfig();
     void SaveConfigAs();
+    void SaveToKeyboard();
 
     // Edit operations
+    bool IsConfigLoaded() const { return m_configLoaded; }
     bool CanUndo() const { return !m_undoStack.empty(); }
     bool CanRedo() const { return !m_redoStack.empty(); }
     void Undo();
@@ -139,10 +141,6 @@ private:
 
     // ── LED Schemes ───────────────────────────────────────────────────────────
     std::vector<LedScheme>  m_predefinedSchemes;
-    // One scheme index (into m_predefinedSchemes) per layer; -1 = custom
-    std::vector<int>        m_layerSchemeIdx;
-    // Custom scheme per layer (used when m_layerSchemeIdx[l] == -1)
-    std::vector<LedScheme>  m_layerCustomScheme;
 
     void EnsureLayerSchemes();      // resize vectors to match layer count
     ImU32 KeyFaceColor(int ki) const;  // returns the draw color for key ki
