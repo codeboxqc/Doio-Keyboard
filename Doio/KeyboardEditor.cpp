@@ -120,6 +120,17 @@ std::string KeyboardEditor::VkName(int vk) {
     case VK_NUMPAD7:    return "Num7";
     case VK_NUMPAD8:    return "Num8";
     case VK_NUMPAD9:    return "Num9";
+    case VK_VOLUME_MUTE: return "Mute";
+    case VK_VOLUME_DOWN: return "Vol-";
+    case VK_VOLUME_UP:   return "Vol+";
+    case VK_MEDIA_NEXT_TRACK: return "Next";
+    case VK_MEDIA_PREV_TRACK: return "Prev";
+    case VK_MEDIA_STOP:       return "Stop";
+    case VK_MEDIA_PLAY_PAUSE: return "Play";
+    case VK_BROWSER_BACK:     return "Back";
+    case VK_BROWSER_FORWARD:  return "Fwd";
+    case VK_BROWSER_HOME:     return "Home";
+    case VK_BROWSER_REFRESH:  return "Refresh";
     default:
         if (vk >= VK_F1 && vk <= VK_F24) {
             char s[8]; snprintf(s, sizeof(s), "F%d", vk - VK_F1 + 1); return s;
@@ -191,6 +202,13 @@ void KeyboardEditor::SaveConfigAs() {
         m_configPath = path;
         m_dirty      = false;
     }
+}
+
+void KeyboardEditor::SaveToKeyboard() {
+    if (!m_configLoaded) return;
+    SaveConfig();
+    // In a real app, this would send the config to the HID device.
+    // For now, we simulate success via a transient status message.
 }
 
 // ─── Edit operations ─────────────────────────────────────────────────────────
@@ -358,16 +376,21 @@ void KeyboardEditor::EnsureLayerSchemes() {
     int n =  max(m_config.LayerCount(), m_layoutLoaded ? 1 : 0);
     if (n == 0) n = 1;
 
-    while ((int)m_layerSchemeIdx.size() < n) {
-        int li = (int)m_layerSchemeIdx.size();
-        // Default: pick predefined scheme by layer index cycling through palettes
-        m_layerSchemeIdx.push_back(li % (int)m_predefinedSchemes.size());
-        LedScheme cs;
-        cs.name = "Custom";
-        cs.type = LedSchemeType::Solid;
-        const float* c = kLayerColors[li % kMaxLayers];
-        cs.primary = {c[0], c[1], c[2]};
-        m_layerCustomScheme.push_back(cs);
+    if (m_configLoaded) {
+        while ((int)m_config.ledSchemes.size() < n) {
+            int li = (int)m_config.ledSchemes.size();
+            LedScheme ls;
+            // Default: pick predefined scheme by layer index cycling through palettes
+            if (!m_predefinedSchemes.empty()) {
+                ls = m_predefinedSchemes[li % m_predefinedSchemes.size()];
+            } else {
+                ls.name = "Layer " + std::to_string(li);
+                ls.type = LedSchemeType::Solid;
+                const float* c = kLayerColors[li % kMaxLayers];
+                ls.primary = {c[0], c[1], c[2]};
+            }
+            m_config.ledSchemes.push_back(ls);
+        }
     }
 }
 
@@ -386,13 +409,10 @@ ImU32 KeyboardEditor::KeyFaceColor(int ki) const {
 
     // Determine which scheme to use
     int li = m_currentLayer;
-    if (li < 0 || li >= (int)m_layerSchemeIdx.size())
+    if (li < 0 || li >= (int)m_config.ledSchemes.size())
         return IM_COL32(80, 100, 140, 255);
 
-    int schemeIdx = m_layerSchemeIdx[li];
-    const LedScheme& scheme = (schemeIdx >= 0)
-        ? m_predefinedSchemes[schemeIdx]
-        : m_layerCustomScheme[li];
+    const LedScheme& scheme = m_config.ledSchemes[li];
 
     float br = scheme.brightness;
     RgbF p = scheme.primary;
@@ -534,7 +554,10 @@ void KeyboardEditor::Render() {
     if (io.KeyCtrl) {
         if (ImGui::IsKeyPressed(ImGuiKey_Z)) Undo();
         if (ImGui::IsKeyPressed(ImGuiKey_Y)) Redo();
-        if (ImGui::IsKeyPressed(ImGuiKey_S)) SaveConfig();
+        if (ImGui::IsKeyPressed(ImGuiKey_S)) {
+            if (io.KeyShift) SaveToKeyboard();
+            else SaveConfig();
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_O)) OpenConfig();
     }
 }
@@ -1143,6 +1166,16 @@ void KeyboardEditor::RenderKeyTesterPanel() {
             {VK_F1,"KC_F1"},{VK_F2,"KC_F2"},{VK_F3,"KC_F3"},{VK_F4,"KC_F4"},
             {VK_F5,"KC_F5"},{VK_F6,"KC_F6"},{VK_F7,"KC_F7"},{VK_F8,"KC_F8"},
             {VK_F9,"KC_F9"},{VK_F10,"KC_F10"},{VK_F11,"KC_F11"},{VK_F12,"KC_F12"},
+            {VK_NUMPAD0,"KC_P0"},{VK_NUMPAD1,"KC_P1"},{VK_NUMPAD2,"KC_P2"},
+            {VK_NUMPAD3,"KC_P3"},{VK_NUMPAD4,"KC_P4"},{VK_NUMPAD5,"KC_P5"},
+            {VK_NUMPAD6,"KC_P6"},{VK_NUMPAD7,"KC_P7"},{VK_NUMPAD8,"KC_P8"},
+            {VK_NUMPAD9,"KC_P9"},{VK_DECIMAL,"KC_PDOT"},{VK_DIVIDE,"KC_PSLS"},
+            {VK_MULTIPLY,"KC_PAST"},{VK_SUBTRACT,"KC_PMNS"},{VK_ADD,"KC_PPLS"},
+            {VK_VOLUME_MUTE,"KC_MUTE"},{VK_VOLUME_DOWN,"KC_VOLD"},{VK_VOLUME_UP,"KC_VOLU"},
+            {VK_MEDIA_NEXT_TRACK,"KC_MNXT"},{VK_MEDIA_PREV_TRACK,"KC_MPRV"},
+            {VK_MEDIA_STOP,"KC_MSTP"},{VK_MEDIA_PLAY_PAUSE,"KC_MPLY"},
+            {VK_BROWSER_BACK,"KC_WWW_BACK"},{VK_BROWSER_FORWARD,"KC_WWW_FWRD"},
+            {VK_BROWSER_HOME,"KC_WWW_HOME"},{VK_BROWSER_REFRESH,"KC_WWW_RFSH"},
         };
 
         // Build set of currently-pressed QMK keycodes
@@ -1215,139 +1248,109 @@ void KeyboardEditor::RenderKeyTesterPanel() {
 void KeyboardEditor::RenderLedSchemePanel() {
     EnsureLayerSchemes();
 
-    int layerCount = m_configLoaded ? m_config.LayerCount() : 1;
+    if (!m_configLoaded) {
+        ImGui::TextDisabled("Load a me.json to configure LED schemes.");
+        return;
+    }
+
+    int layerCount = m_config.LayerCount();
 
     ImGui::Text("Per-layer LED colour scheme");
-    ImGui::TextDisabled("Each layer can have its own lighting. Changes preview in Keyboard View.");
+    ImGui::TextDisabled("Each layer has its own independent lighting configuration.");
     ImGui::Separator();
 
     // Tabs: one per layer
     if (ImGui::BeginTabBar("##ledlayers")) {
-        for (int li = 0; li < layerCount && li < (int)m_layerSchemeIdx.size(); ++li) {
+        for (int li = 0; li < layerCount && li < (int)m_config.ledSchemes.size(); ++li) {
             char tabName[16]; snprintf(tabName, sizeof(tabName), "Layer %d", li);
+            LedScheme& cur = m_config.ledSchemes[li];
 
             // Colour the tab with the layer's primary colour
-            int si = m_layerSchemeIdx[li];
-            const LedScheme& cur = (si >= 0)
-                ? m_predefinedSchemes[si]
-                : m_layerCustomScheme[li];
             ImGui::PushStyleColor(ImGuiCol_Tab,
-                ImVec4(cur.primary.r*0.4f, cur.primary.g*0.4f, cur.primary.b*0.4f, 1.f));
+                ImVec4(cur.primary.r * 0.4f, cur.primary.g * 0.4f, cur.primary.b * 0.4f, 1.f));
             ImGui::PushStyleColor(ImGuiCol_TabActive,
-                ImVec4(cur.primary.r*0.7f, cur.primary.g*0.7f, cur.primary.b*0.7f, 1.f));
+                ImVec4(cur.primary.r * 0.7f, cur.primary.g * 0.7f, cur.primary.b * 0.7f, 1.f));
 
             if (ImGui::BeginTabItem(tabName)) {
                 ImGui::PopStyleColor(2);
-
-                int& idx = m_layerSchemeIdx[li];
-                LedScheme& cust = m_layerCustomScheme[li];
+                ImGui::PushID(li);
 
                 // ── Predefined palette grid ────────────────────────────────
-                ImGui::Text("Predefined Schemes:");
+                ImGui::Text("Apply Template:");
                 ImGui::Separator();
 
                 int cols = 3;
-                float btnW = (ImGui::GetContentRegionAvail().x - (cols-1)*6) / cols;
+                float btnW = (ImGui::GetContentRegionAvail().x - (cols - 1) * 6) / cols;
                 for (int pi = 0; pi < (int)m_predefinedSchemes.size(); ++pi) {
                     const LedScheme& ps = m_predefinedSchemes[pi];
-                    bool isSel = (idx == pi);
 
                     // Coloured button
                     ImVec4 c(ps.primary.r * 0.8f + 0.1f,
-                             ps.primary.g * 0.8f + 0.1f,
-                             ps.primary.b * 0.8f + 0.1f, 1.f);
-                    ImVec4 cDim(c.x*0.5f, c.y*0.5f, c.z*0.5f, 1.f);
+                        ps.primary.g * 0.8f + 0.1f,
+                        ps.primary.b * 0.8f + 0.1f, 1.f);
+                    ImVec4 cDim(c.x * 0.5f, c.y * 0.5f, c.z * 0.5f, 1.f);
 
-                    ImGui::PushID(pi + li * 1000);
-                    if (isSel) {
-                        ImGui::PushStyleColor(ImGuiCol_Button, c);
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.05f,0.05f,0.05f,1.f));
-                    } else {
-                        ImGui::PushStyleColor(ImGuiCol_Button, cDim);
-                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f,0.9f,0.9f,1.f));
-                    }
+                    ImGui::PushID(pi);
+                    ImGui::PushStyleColor(ImGuiCol_Button, cDim);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, c);
 
-                    // Show a small colour swatch + name
-                    char btnLbl[48];
-                    snprintf(btnLbl, sizeof(btnLbl), "%s %s###ps%d",
-                        isSel ? "●" : " ",
-                        ps.name.c_str(), pi);
-
-                    if (ImGui::Button(btnLbl, ImVec2(btnW, 0))) {
-                        idx = pi;
+                    if (ImGui::Button(ps.name.c_str(), ImVec2(btnW, 0))) {
+                        cur = ps; // Copy entire scheme
+                        m_dirty = true;
                     }
                     if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Type: %s", LedSchemeTypeName(ps.type));
+                        ImGui::SetTooltip("Apply '%s' template", ps.name.c_str());
 
                     ImGui::PopStyleColor(2);
                     ImGui::PopID();
-                    if ((pi+1) % cols != 0) ImGui::SameLine();
+                    if ((pi + 1) % cols != 0) ImGui::SameLine();
                 }
 
                 ImGui::Separator();
+                ImGui::Text("Adjust Parameters:");
 
-                // ── Custom section ─────────────────────────────────────────
-                bool useCustom = (idx < 0);
-                if (ImGui::Checkbox("Use Custom Scheme", &useCustom)) {
-                    idx = useCustom ? -1 : 0;
-                }
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.13f, 0.13f, 0.18f, 1.f));
+                ImGui::BeginChild("##custscheme", ImVec2(0, 200), true);
 
-                if (useCustom) {
-                    ImGui::PushStyleColor(ImGuiCol_ChildBg,
-                        ImVec4(0.13f, 0.13f, 0.18f, 1.f));
-                    ImGui::BeginChild("##custscheme", ImVec2(0, 180), true);
-
-                    // Name
-                    char nb[64]; strncpy_s(nb, cust.name.c_str(), sizeof(nb)-1);
-                    ImGui::SetNextItemWidth(180.f);
-                    if (ImGui::InputText("Name##csname", nb, sizeof(nb)))
-                        cust.name = nb;
-
-                    // Type
-                    ImGui::SetNextItemWidth(180.f);
-                    if (ImGui::BeginCombo("Type##cstype",
-                        LedSchemeTypeName(cust.type)))
-                    {
-                        for (int t = 0; t < (int)LedSchemeType::COUNT; ++t) {
-                            bool sel = ((int)cust.type == t);
-                            if (ImGui::Selectable(
-                                LedSchemeTypeName((LedSchemeType)t), sel))
-                                cust.type = (LedSchemeType)t;
-                            if (sel) ImGui::SetItemDefaultFocus();
+                // Type
+                ImGui::SetNextItemWidth(180.f);
+                if (ImGui::BeginCombo("Animation Type", LedSchemeTypeName(cur.type))) {
+                    for (int t = 0; t < (int)LedSchemeType::COUNT; ++t) {
+                        bool sel = ((int)cur.type == t);
+                        if (ImGui::Selectable(LedSchemeTypeName((LedSchemeType)t), sel)) {
+                            cur.type = (LedSchemeType)t;
+                            m_dirty = true;
                         }
-                        ImGui::EndCombo();
+                        if (sel) ImGui::SetItemDefaultFocus();
                     }
+                    ImGui::EndCombo();
+                }
 
-                    // Primary colour picker
-                    float pArr[3] = {cust.primary.r, cust.primary.g, cust.primary.b};
-                    if (ImGui::ColorEdit3("Primary Colour##cspri", pArr,
-                        ImGuiColorEditFlags_NoInputs |
-                        ImGuiColorEditFlags_PickerHueWheel))
-                        cust.primary = {pArr[0], pArr[1], pArr[2]};
+                // Primary colour picker
+                float pArr[3] = { cur.primary.r, cur.primary.g, cur.primary.b };
+                if (ImGui::ColorEdit3("Primary Colour", pArr,
+                    ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_PickerHueWheel)) {
+                    cur.primary = { pArr[0], pArr[1], pArr[2] };
+                    m_dirty = true;
+                }
 
-                    // Secondary (shown for gradient types)
-                    if (cust.type == LedSchemeType::Rainbow ||
-                        cust.type == LedSchemeType::RainbowWave) {
-                        float sArr[3] = {cust.secondary.r, cust.secondary.g, cust.secondary.b};
-                        if (ImGui::ColorEdit3("Secondary Colour##cssec", sArr,
-                            ImGuiColorEditFlags_NoInputs |
-                            ImGuiColorEditFlags_PickerHueWheel))
-                            cust.secondary = {sArr[0], sArr[1], sArr[2]};
-                    }
-
-                    ImGui::SliderFloat("Speed##csspd",  &cust.speed,      0.1f, 5.f);
-                    ImGui::SliderFloat("Brightness##csbr", &cust.brightness, 0.f, 1.f);
-
-                    ImGui::EndChild();
-                    ImGui::PopStyleColor();
-                } else {
-                    // Show editable brightness/speed for the predefined scheme too
-                    if (idx >= 0 && idx < (int)m_predefinedSchemes.size()) {
-                        LedScheme& ps = m_predefinedSchemes[idx];
-                        ImGui::SliderFloat("Speed##psspd",  &ps.speed,      0.1f, 5.f);
-                        ImGui::SliderFloat("Brightness##psbr", &ps.brightness, 0.f, 1.f);
+                // Secondary (shown for gradient types)
+                if (cur.type == LedSchemeType::Rainbow ||
+                    cur.type == LedSchemeType::RainbowWave) {
+                    float sArr[3] = { cur.secondary.r, cur.secondary.g, cur.secondary.b };
+                    if (ImGui::ColorEdit3("Secondary Colour", sArr,
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_PickerHueWheel)) {
+                        cur.secondary = { sArr[0], sArr[1], sArr[2] };
+                        m_dirty = true;
                     }
                 }
+
+                if (ImGui::SliderFloat("Speed", &cur.speed, 0.1f, 5.f)) m_dirty = true;
+                if (ImGui::SliderFloat("Brightness", &cur.brightness, 0.f, 1.f)) m_dirty = true;
+
+                ImGui::EndChild();
+                ImGui::PopStyleColor();
+                ImGui::PopID();
 
                 ImGui::EndTabItem();
             } else {

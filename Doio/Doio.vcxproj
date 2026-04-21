@@ -134,6 +134,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Doio.cpp" />
+    <ClCompile Include="font.cpp" />
     <ClCompile Include="KeyboardConfig.cpp" />
     <ClCompile Include="KeyboardEditor.cpp" />
   </ItemGroup>
