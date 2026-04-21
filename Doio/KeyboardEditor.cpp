@@ -1,3 +1,4 @@
+#include "Keytest.h"
 #include "KeyboardEditor.h"
 #include "imgui.h"
 #include <cstring>
@@ -55,91 +56,6 @@ static std::string SaveFileDialog(const char* title, const char* filter,
 }
 
 // ─── VK name lookup ──────────────────────────────────────────────────────────
-
-std::string KeyboardEditor::VkName(int vk) {
-    // Printable ASCII
-    if (vk >= 'A' && vk <= 'Z') { char s[2] = { (char)vk, 0 }; return s; }
-    if (vk >= '0' && vk <= '9') { char s[2] = { (char)vk, 0 }; return s; }
-    // Named keys
-    switch (vk) {
-    case VK_RETURN:   return "Enter";
-    case VK_ESCAPE:   return "Esc";
-    case VK_BACK:     return "Backspace";
-    case VK_TAB:      return "Tab";
-    case VK_SPACE:    return "Space";
-    case VK_SHIFT:    return "Shift";
-    case VK_LSHIFT:   return "LShift";
-    case VK_RSHIFT:   return "RShift";
-    case VK_CONTROL:  return "Ctrl";
-    case VK_LCONTROL: return "LCtrl";
-    case VK_RCONTROL: return "RCtrl";
-    case VK_MENU:     return "Alt";
-    case VK_LMENU:    return "LAlt";
-    case VK_RMENU:    return "RAlt";
-    case VK_LWIN:     return "LWin";
-    case VK_RWIN:     return "RWin";
-    case VK_APPS:     return "Menu";
-    case VK_CAPITAL:  return "CapsLock";
-    case VK_NUMLOCK:  return "NumLock";
-    case VK_SCROLL:   return "ScrLock";
-    case VK_SNAPSHOT: return "PrtSc";
-    case VK_PAUSE:    return "Pause";
-    case VK_INSERT:   return "Insert";
-    case VK_DELETE:   return "Delete";
-    case VK_HOME:     return "Home";
-    case VK_END:      return "End";
-    case VK_PRIOR:    return "PageUp";
-    case VK_NEXT:     return "PageDown";
-    case VK_UP:       return "Up";
-    case VK_DOWN:     return "Down";
-    case VK_LEFT:     return "Left";
-    case VK_RIGHT:    return "Right";
-    case VK_OEM_1:    return ";";
-    case VK_OEM_2:    return "/";
-    case VK_OEM_3:    return "`";
-    case VK_OEM_4:    return "[";
-    case VK_OEM_5:    return "\\";
-    case VK_OEM_6:    return "]";
-    case VK_OEM_7:    return "'";
-    case VK_OEM_MINUS:  return "-";
-    case VK_OEM_PLUS:   return "=";
-    case VK_OEM_COMMA:  return ",";
-    case VK_OEM_PERIOD: return ".";
-    case VK_MULTIPLY:   return "Num*";
-    case VK_ADD:        return "Num+";
-    case VK_SUBTRACT:   return "Num-";
-    case VK_DIVIDE:     return "Num/";
-    case VK_DECIMAL:    return "Num.";
-    case VK_NUMPAD0:    return "Num0";
-    case VK_NUMPAD1:    return "Num1";
-    case VK_NUMPAD2:    return "Num2";
-    case VK_NUMPAD3:    return "Num3";
-    case VK_NUMPAD4:    return "Num4";
-    case VK_NUMPAD5:    return "Num5";
-    case VK_NUMPAD6:    return "Num6";
-    case VK_NUMPAD7:    return "Num7";
-    case VK_NUMPAD8:    return "Num8";
-    case VK_NUMPAD9:    return "Num9";
-    case VK_VOLUME_MUTE: return "Mute";
-    case VK_VOLUME_DOWN: return "Vol-";
-    case VK_VOLUME_UP:   return "Vol+";
-    case VK_MEDIA_NEXT_TRACK: return "Next";
-    case VK_MEDIA_PREV_TRACK: return "Prev";
-    case VK_MEDIA_STOP:       return "Stop";
-    case VK_MEDIA_PLAY_PAUSE: return "Play";
-    case VK_BROWSER_BACK:     return "Back";
-    case VK_BROWSER_FORWARD:  return "Fwd";
-    case VK_BROWSER_HOME:     return "Home";
-    case VK_BROWSER_REFRESH:  return "Refresh";
-    default:
-        if (vk >= VK_F1 && vk <= VK_F24) {
-            char s[8]; snprintf(s, sizeof(s), "F%d", vk - VK_F1 + 1); return s;
-        }
-        char s[8]; snprintf(s, sizeof(s), "VK%02X", vk); return s;
-    }
-}
-
-// ─── Constructor ─────────────────────────────────────────────────────────────
 
 KeyboardEditor::KeyboardEditor() {
     m_keycodeDb      = BuildKeycodeDatabase();
@@ -473,39 +389,10 @@ ImU32 KeyboardEditor::KeyFaceColor(int ki) const {
 
 // ─── Key Tester polling ───────────────────────────────────────────────────────
 
-void KeyboardEditor::PollKeyTester() {
-    if (!m_testerActive) return;
-    float now = (float)ImGui::GetTime() - m_appStartTime;
-
-    for (int vk = 1; vk < 256; ++vk) {
-        bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
-        if (down && !m_vkDown[vk]) {
-            // Key pressed
-            KeyPressEvent ev;
-            ev.vkCode    = vk;
-            ev.name      = VkName(vk);
-            ev.isDown    = true;
-            ev.timestamp = now;
-            m_keyLog.push_back(ev);
-            if ((int)m_keyLog.size() > kLogMaxSize) m_keyLog.pop_front();
-        } else if (!down && m_vkDown[vk]) {
-            // Key released
-            KeyPressEvent ev;
-            ev.vkCode    = vk;
-            ev.name      = VkName(vk);
-            ev.isDown    = false;
-            ev.timestamp = now;
-            m_keyLog.push_back(ev);
-            if ((int)m_keyLog.size() > kLogMaxSize) m_keyLog.pop_front();
-        }
-        m_vkDown[vk] = down;
-    }
-}
-
 // ─── Main Render ─────────────────────────────────────────────────────────────
 
 void KeyboardEditor::Render() {
-    PollKeyTester();
+    m_keyTester.PollKeyTester(m_appStartTime);
 
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoCollapse;
 
@@ -535,7 +422,7 @@ void KeyboardEditor::Render() {
     // ── Key Tester ───────────────────────────────────────────────────────────
     ImGui::SetNextWindowSize(ImVec2(760, 440), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Key Tester", nullptr, wf)) {
-        RenderKeyTesterPanel();
+        m_keyTester.RenderKeyTesterPanel();
     }
     ImGui::End();
 
@@ -1083,167 +970,6 @@ void KeyboardEditor::RenderMacroPanel() {
 }
 
 // ─── Key Tester ───────────────────────────────────────────────────────────────
-
-void KeyboardEditor::RenderKeyTesterPanel() {
-    // Toggle
-    if (m_testerActive) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f,0.2f,0.2f,1.f));
-        if (ImGui::Button("■ Stop Testing")) {
-            m_testerActive = false;
-            m_vkDown.assign(256, false);
-        }
-        ImGui::PopStyleColor();
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f,0.6f,0.3f,1.f));
-        if (ImGui::Button("▶ Start Key Test")) {
-            m_testerActive = true;
-            m_keyLog.clear();
-            m_vkDown.assign(256, false);
-        }
-        ImGui::PopStyleColor();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear Log")) m_keyLog.clear();
-    ImGui::SameLine();
-    ImGui::TextDisabled(m_testerActive
-        ? "Press keys — detects via GetAsyncKeyState"
-        : "Click Start to begin capture");
-
-    ImGui::Separator();
-
-    // ── Currently held keys (visual chips) ───────────────────────────────────
-    ImGui::Text("Held now:");
-    ImGui::SameLine();
-    bool anyHeld = false;
-    for (int vk = 1; vk < 256; ++vk) {
-        if (!m_vkDown[vk]) continue;
-        anyHeld = true;
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f,0.55f,0.95f,1.f));
-        ImGui::SmallButton(VkName(vk).c_str());
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-    }
-    if (!anyHeld) ImGui::TextDisabled("(none)");
-    ImGui::NewLine();
-    ImGui::Separator();
-
-    // ── Keyboard grid visual ─────────────────────────────────────────────────
-    // Map VK codes to QMK keycodes so we can highlight on the layout
-    // Simple: if layout loaded, highlight keys whose keycode VK matches pressed
-    if (m_layoutLoaded && m_configLoaded) {
-        ImGui::Text("Layout highlight (layer %d):", m_currentLayer);
-        ImVec2 avail = ImGui::GetContentRegionAvail();
-        float ku = min(avail.x / (m_layout.totalW + 0.5f), 42.f);
-        ku = max(ku, 14.f);
-        float ox = ImGui::GetCursorScreenPos().x + 4.f;
-        float oy = ImGui::GetCursorScreenPos().y + 4.f;
-        ImGui::Dummy(ImVec2(m_layout.totalW * ku + 8.f,
-                             m_layout.totalH * ku + 8.f));
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-
-        // Build a small VK→KC map for common keys
-        static const struct { int vk; const char* kc; } vkmap[] = {
-            {'A',"KC_A"},{'B',"KC_B"},{'C',"KC_C"},{'D',"KC_D"},{'E',"KC_E"},
-            {'F',"KC_F"},{'G',"KC_G"},{'H',"KC_H"},{'I',"KC_I"},{'J',"KC_J"},
-            {'K',"KC_K"},{'L',"KC_L"},{'M',"KC_M"},{'N',"KC_N"},{'O',"KC_O"},
-            {'P',"KC_P"},{'Q',"KC_Q"},{'R',"KC_R"},{'S',"KC_S"},{'T',"KC_T"},
-            {'U',"KC_U"},{'V',"KC_V"},{'W',"KC_W"},{'X',"KC_X"},{'Y',"KC_Y"},
-            {'Z',"KC_Z"},
-            {'0',"KC_0"},{'1',"KC_1"},{'2',"KC_2"},{'3',"KC_3"},{'4',"KC_4"},
-            {'5',"KC_5"},{'6',"KC_6"},{'7',"KC_7"},{'8',"KC_8"},{'9',"KC_9"},
-            {VK_RETURN,"KC_ENT"},{VK_ESCAPE,"KC_ESC"},{VK_BACK,"KC_BSPC"},
-            {VK_TAB,"KC_TAB"},{VK_SPACE,"KC_SPC"},{VK_LSHIFT,"KC_LSFT"},
-            {VK_RSHIFT,"KC_RSFT"},{VK_LCONTROL,"KC_LCTL"},{VK_RCONTROL,"KC_RCTL"},
-            {VK_LMENU,"KC_LALT"},{VK_RMENU,"KC_RALT"},{VK_LWIN,"KC_LGUI"},
-            {VK_CAPITAL,"KC_CAPS"},{VK_DELETE,"KC_DEL"},{VK_INSERT,"KC_INS"},
-            {VK_HOME,"KC_HOME"},{VK_END,"KC_END"},{VK_PRIOR,"KC_PGUP"},
-            {VK_NEXT,"KC_PGDN"},{VK_UP,"KC_UP"},{VK_DOWN,"KC_DOWN"},
-            {VK_LEFT,"KC_LEFT"},{VK_RIGHT,"KC_RGHT"},
-            {VK_OEM_MINUS,"KC_MINS"},{VK_OEM_PLUS,"KC_EQL"},
-            {VK_OEM_4,"KC_LBRC"},{VK_OEM_6,"KC_RBRC"},{VK_OEM_5,"KC_BSLS"},
-            {VK_OEM_1,"KC_SCLN"},{VK_OEM_7,"KC_QUOT"},{VK_OEM_3,"KC_GRV"},
-            {VK_OEM_COMMA,"KC_COMM"},{VK_OEM_PERIOD,"KC_DOT"},{VK_OEM_2,"KC_SLSH"},
-            {VK_F1,"KC_F1"},{VK_F2,"KC_F2"},{VK_F3,"KC_F3"},{VK_F4,"KC_F4"},
-            {VK_F5,"KC_F5"},{VK_F6,"KC_F6"},{VK_F7,"KC_F7"},{VK_F8,"KC_F8"},
-            {VK_F9,"KC_F9"},{VK_F10,"KC_F10"},{VK_F11,"KC_F11"},{VK_F12,"KC_F12"},
-            {VK_NUMPAD0,"KC_P0"},{VK_NUMPAD1,"KC_P1"},{VK_NUMPAD2,"KC_P2"},
-            {VK_NUMPAD3,"KC_P3"},{VK_NUMPAD4,"KC_P4"},{VK_NUMPAD5,"KC_P5"},
-            {VK_NUMPAD6,"KC_P6"},{VK_NUMPAD7,"KC_P7"},{VK_NUMPAD8,"KC_P8"},
-            {VK_NUMPAD9,"KC_P9"},{VK_DECIMAL,"KC_PDOT"},{VK_DIVIDE,"KC_PSLS"},
-            {VK_MULTIPLY,"KC_PAST"},{VK_SUBTRACT,"KC_PMNS"},{VK_ADD,"KC_PPLS"},
-            {VK_VOLUME_MUTE,"KC_MUTE"},{VK_VOLUME_DOWN,"KC_VOLD"},{VK_VOLUME_UP,"KC_VOLU"},
-            {VK_MEDIA_NEXT_TRACK,"KC_MNXT"},{VK_MEDIA_PREV_TRACK,"KC_MPRV"},
-            {VK_MEDIA_STOP,"KC_MSTP"},{VK_MEDIA_PLAY_PAUSE,"KC_MPLY"},
-            {VK_BROWSER_BACK,"KC_WWW_BACK"},{VK_BROWSER_FORWARD,"KC_WWW_FWRD"},
-            {VK_BROWSER_HOME,"KC_WWW_HOME"},{VK_BROWSER_REFRESH,"KC_WWW_RFSH"},
-        };
-
-        // Build set of currently-pressed QMK keycodes
-        std::unordered_map<std::string,bool> pressedKc;
-        if (m_testerActive) {
-            for (auto& vm : vkmap) {
-                if (m_vkDown[vm.vk]) pressedKc[vm.kc] = true;
-            }
-        }
-
-        const float p = 2.f, r = 3.f;
-        for (const auto& pk : m_layout.keys) {
-            ImVec2 tl(ox + pk.x*ku+p, oy + pk.y*ku+p);
-            ImVec2 br(ox + (pk.x+pk.w)*ku-p, oy + (pk.y+pk.h)*ku-p);
-
-            int fi = m_layout.ConfigIndex(pk.matrix);
-            const std::string& kc = m_config.Keycode(m_currentLayer, fi);
-            bool pressed = pressedKc.count(kc) > 0;
-
-            ImU32 face = pressed
-                ? IM_COL32(60, 200, 100, 255)
-                : IM_COL32(40, 45, 55, 220);
-            ImU32 border = pressed
-                ? IM_COL32(120, 255, 160, 255)
-                : IM_COL32(80, 85, 100, 255);
-
-            dl->AddRectFilled(tl, br, face, r);
-            dl->AddRect(tl, br, border, r, 0, 1.5f);
-
-            std::string lbl = GetKeycodeLabel(kc, m_keycodeMap);
-            ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-            // Only draw label if key is wide enough
-            if ((br.x - tl.x) > ts.x + 2.f) {
-                float cx = tl.x + (br.x-tl.x-ts.x)*0.5f;
-                float cy = tl.y + (br.y-tl.y-ts.y)*0.5f;
-                dl->AddText({cx,cy},
-                    pressed ? IM_COL32(20,30,20,255) : IM_COL32(180,185,200,255),
-                    lbl.c_str());
-            }
-        }
-    } else {
-        ImGui::TextDisabled("Load design.json + me.json to see layout highlighting.");
-    }
-
-    ImGui::Separator();
-
-    // ── Event log ─────────────────────────────────────────────────────────────
-    ImGui::Text("Event log (%d events):", (int)m_keyLog.size());
-    ImGui::SameLine();
-    static bool autoScroll = true;
-    ImGui::Checkbox("Auto-scroll", &autoScroll);
-
-    ImGui::BeginChild("##keylog", ImVec2(0, 120), true);
-    for (auto it = m_keyLog.rbegin(); it != m_keyLog.rend(); ++it) {
-        ImVec4 col = it->isDown
-            ? ImVec4(0.4f, 0.9f, 0.4f, 1.f)
-            : ImVec4(0.7f, 0.7f, 0.7f, 1.f);
-        ImGui::TextColored(col, "[%6.2fs] %s  VK=0x%02X  %s",
-            it->timestamp,
-            it->isDown ? "DOWN" : "UP  ",
-            it->vkCode,
-            it->name.c_str());
-    }
-    if (autoScroll) ImGui::SetScrollHereY(0.f);
-    ImGui::EndChild();
-}
-
-// ─── LED Scheme panel ─────────────────────────────────────────────────────────
 
 void KeyboardEditor::RenderLedSchemePanel() {
     EnsureLayerSchemes();

@@ -36,6 +36,9 @@
     <ClInclude Include="KeycodeDefs.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Keytest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Doio.cpp">
@@ -45,6 +48,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="KeyboardEditor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Keytest.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="font.cpp">

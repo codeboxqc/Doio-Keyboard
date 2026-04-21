@@ -129,6 +129,7 @@
     <ClInclude Include="KeyboardConfig.h" />
     <ClInclude Include="KeyboardEditor.h" />
     <ClInclude Include="KeycodeDefs.h" />
+    <ClInclude Include="Keytest.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="targetver.h" />
   </ItemGroup>
@@ -137,6 +138,7 @@
     <ClCompile Include="font.cpp" />
     <ClCompile Include="KeyboardConfig.cpp" />
     <ClCompile Include="KeyboardEditor.cpp" />
+    <ClCompile Include="Keytest.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="Doio.rc" />

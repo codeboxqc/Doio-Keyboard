@@ -14,12 +14,14 @@ set(SOURCES
     src/main.cpp
     src/KeyboardConfig.cpp
     src/KeyboardEditor.cpp
+    src/Keytest.cpp
 )
 
 set(HEADERS
     src/KeyboardConfig.h
     src/KeyboardEditor.h
     src/KeycodeDefs.h
+    src/Keytest.h
 )
 
 # ── Target ───────────────────────────────────────────────────────────────────
