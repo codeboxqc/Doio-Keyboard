@@ -20,15 +20,19 @@ echo.
 if exist dist\map.exe (
     echo [+] Done!  dist\map.exe is ready.
     echo.
-    echo     Copy these files next to map.exe:
-    echo       kb16VIA.json
-    echo       test.json
+    echo  Usage:
+    echo    map.exe design.json                    ^<- auto flash me.json
+    echo    map.exe design.json me.json            ^<- flash explicit file
+    echo    map.exe design.json --dump             ^<- backup keyboard
+    echo    map.exe design.json --export           ^<- export as me.json ^(for Editor^)
+    echo    map.exe design.json --restore bak.json ^<- restore backup
+    echo    map.exe --scan                         ^<- list HID devices
     echo.
-    echo     Commands:
-    echo       map.exe kb16VIA.json --dump                      <- backup FIRST!
-    echo       map.exe kb16VIA.json test.json                   <- flash new keymap
-    echo       map.exe kb16VIA.json --restore backup_XYZ.json  <- restore backup
-    echo       map.exe --scan                                   <- list HID devices
+    echo  Supported keyboards:
+    echo    KB16-01     kb16-01.json
+    echo    KB16B-02    kb16b-02.json
+    echo    KB16B-02V2  kb16b-02_v2.json
+    echo    KB64G-01    kb64g-01_v2.json
 ) else (
     echo [ERROR] Build failed - map.exe not found in dist\
 )
