@@ -41,7 +41,13 @@ DOIO kb16b-02 V2 .json KB16-01
    - File → Flash to Keyboard (Ctrl+Shift+S)
    - Confirm the operation
 
----
+Preview editor
+<img width="1913" height="1077" alt="Untitled" src="https://github.com/user-attachments/assets/be1e9ba4-80d3-41ba-b641-83a9a88507d5" />
+
+
+test working 
+<img width="1000" height="450" alt="1776947733886" src="https://github.com/user-attachments/assets/ba0f86a5-d285-4792-b108-a1c55ca763b6" />
+<img width="1000" height="450" alt="1776947733913" src="https://github.com/user-attachments/assets/a4bae8e6-8fd8-40eb-b979-9c61ddc5fc55" />
 
 ## 🛠️ Building from Source
 
@@ -105,13 +111,7 @@ Copy DOIOEditor.exe and map.exe to the same folder
 
 Run DOIOEditor.exe
 
-Preview editor
-<img width="1913" height="1077" alt="Untitled" src="https://github.com/user-attachments/assets/be1e9ba4-80d3-41ba-b641-83a9a88507d5" />
 
-
-test working 
-<img width="1000" height="450" alt="1776947733886" src="https://github.com/user-attachments/assets/ba0f86a5-d285-4792-b108-a1c55ca763b6" />
-<img width="1000" height="450" alt="1776947733913" src="https://github.com/user-attachments/assets/a4bae8e6-8fd8-40eb-b979-9c61ddc5fc55" />
 
 Project Structure
 text
