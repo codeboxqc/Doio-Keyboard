@@ -32,6 +32,77 @@ const float KeyboardEditor::kLayerColors[kMaxLayers][3] = {
 };
 
 // ─── File dialog helpers ─────────────────────────────────────────────────────
+KeyboardEditor::~KeyboardEditor() {
+    if (m_mapThread.joinable()) {
+        // Give it a moment to finish
+        for (int i = 0; i < 50 && m_mapThreadRunning; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (m_mapThread.joinable()) {
+            m_mapThread.detach();  // Detach to avoid blocking shutdown
+        }
+    }
+}
+
+void KeyboardEditor::LaunchMapExeAsync(const std::string& args) {
+    // Join any previous finished thread before launching a new one
+    if (m_mapThread.joinable()) {
+        m_mapThread.join();
+    }
+
+    // Reset state
+    m_mapStatus = MapExeStatus::Running;
+    m_mapStatusMsg.clear();
+    m_mapResultStatus = MapExeStatus::Idle;
+    m_mapResultMsg.clear();
+    m_showMapResult = true;
+    m_mapThreadRunning = true;
+
+    m_mapThread = std::thread([this, args]() {
+        std::string msg;
+        int exitCode = RunMapExe(args, msg);
+
+        std::lock_guard<std::mutex> lk(m_mapMutex);
+        if (exitCode == 0) {
+            m_mapResultStatus = MapExeStatus::Success;
+        }
+        else {
+            m_mapResultStatus = MapExeStatus::Failed;
+            // Append exit code to message if not already there
+            if (msg.find("exit code") == std::string::npos) {
+                msg += "\n(map.exe exit code: " + std::to_string(exitCode) + ")";
+            }
+        }
+        m_mapResultMsg = msg;
+        m_mapThreadRunning = false;
+        });
+}
+
+void KeyboardEditor::PollMapResult() {
+    if (m_mapStatus != MapExeStatus::Running) return;
+
+    // Check if thread is still running
+    if (m_mapThreadRunning) {
+        // Still running - nothing to do yet
+        return;
+    }
+
+    // Thread has finished - get the result
+    std::lock_guard<std::mutex> lk(m_mapMutex);
+    if (m_mapResultStatus != MapExeStatus::Idle) {
+        m_mapStatus = m_mapResultStatus;
+        m_mapStatusMsg = m_mapResultMsg;
+        // Reset for next operation
+        m_mapResultStatus = MapExeStatus::Idle;
+        m_mapResultMsg.clear();
+
+        // Force popup to show if not already
+        if (!m_showMapResult) {
+            m_showMapResult = true;
+        }
+    }
+}
+
 
 static std::string OpenFileDialog(const char* title, const char* filter) {
     char buf[MAX_PATH] = {};
@@ -142,6 +213,12 @@ int KeyboardEditor::RunMapExe(const std::string& args, std::string& outMsg) {
 
     std::string mapExe = MapExePath();
 
+    // Check if map.exe exists first
+    if (GetFileAttributesA(mapExe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        outMsg = "[error] map.exe not found at:\n" + mapExe;
+        return -2;
+    }
+
     // Build full command line: "map.exe" <args>
     std::string cmdLine = "\"" + mapExe + "\" " + args;
 
@@ -154,7 +231,6 @@ int KeyboardEditor::RunMapExe(const std::string& args, std::string& outMsg) {
         outMsg = "[error] Could not create pipe.";
         return -1;
     }
-    // Don't inherit the read end
     SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
 
     STARTUPINFOA si{};
@@ -163,172 +239,138 @@ int KeyboardEditor::RunMapExe(const std::string& args, std::string& outMsg) {
     si.hStdOutput = hWritePipe;
     si.hStdError = hWritePipe;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.wShowWindow = SW_HIDE;   // hide the console window
+    si.wShowWindow = SW_HIDE;
 
     PROCESS_INFORMATION pi{};
     std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
     cmdBuf.push_back('\0');
 
     BOOL ok = CreateProcessA(
-        nullptr,          // no module name — use cmdLine
+        nullptr,
         cmdBuf.data(),
         nullptr, nullptr,
-        TRUE,             // inherit handles
-        CREATE_NO_WINDOW, // no console flicker
+        TRUE,
+        CREATE_NO_WINDOW,
         nullptr, nullptr,
         &si, &pi);
 
-    CloseHandle(hWritePipe); // close write end in parent so ReadFile ends
+    CloseHandle(hWritePipe);
 
     if (!ok) {
         CloseHandle(hReadPipe);
-        outMsg = "[error] Could not launch map.exe.\n"
-            "Make sure map.exe is in the same folder as the editor.";
+        outMsg = "[error] Could not launch map.exe.\nMake sure map.exe is in the same folder as the editor.";
         return -2;
     }
 
-    // Read all output
+    // Read all output with timeout
     char buf[1024];
     DWORD nRead = 0;
-    while (ReadFile(hReadPipe, buf, sizeof(buf) - 1, &nRead, nullptr) && nRead > 0) {
-        buf[nRead] = '\0';
-        outMsg += buf;
-        if (outMsg.size() > 8192) {   // cap at ~8 KB
-            outMsg += "\n... (output truncated) ...";
-            break;
+    DWORD startTime = GetTickCount();
+    const DWORD timeoutMs = 5000; // 30 second timeout
+
+    while (true) {
+        DWORD bytesAvailable = 0;
+        PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &bytesAvailable, nullptr);
+
+        if (bytesAvailable > 0) {
+            if (ReadFile(hReadPipe, buf, sizeof(buf) - 1, &nRead, nullptr) && nRead > 0) {
+                buf[nRead] = '\0';
+                outMsg += buf;
+                if (outMsg.size() > 8192) {
+                    outMsg += "\n... (output truncated) ...";
+                    break;
+                }
+                continue; // Keep reading while data is available
+            }
         }
+
+        // Check if process is still running
+        DWORD exitCode = STILL_ACTIVE;
+        GetExitCodeProcess(pi.hProcess, &exitCode);
+
+        if (exitCode != STILL_ACTIVE) {
+            // Process finished
+            CloseHandle(hReadPipe);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+
+            Sleep(50);
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            if (exitCode == STILL_ACTIVE) {
+                // Force terminate
+                TerminateProcess(pi.hProcess, 0);
+                exitCode = 0;
+            }
+
+            return (int)exitCode;
+        }
+
+        // Check timeout
+        if (GetTickCount() - startTime > timeoutMs) {
+            // Timeout - terminate the process
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(hReadPipe);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            outMsg += "\n[error] Timeout after 30 seconds";
+            return -3;
+        }
+
+        // Wait a bit before checking again
+        Sleep(50);
+
     }
-    CloseHandle(hReadPipe);
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exitCode = 0;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-
-    return (int)exitCode;
 }
 
 void KeyboardEditor::FlashToKeyboard() {
     m_mapStatusMsg.clear();
     m_mapStatus = MapExeStatus::Idle;
     m_showMapResult = false;
+    
 
-    // Validate prerequisites
-    if (m_designPath.empty()) {
-        m_mapStatus = MapExeStatus::NoDesign;
-        m_mapStatusMsg = "No design.json loaded.\nOpen a design first (File → Open Design).";
-        m_showMapResult = true;
-        return;
-    }
-    if (!m_configLoaded) {
-        m_mapStatus = MapExeStatus::NoConfig;
-        m_mapStatusMsg = "No config (me.json) loaded.\nOpen or save a config first.";
-        m_showMapResult = true;
-        return;
-    }
-    if (!PathFileExistsA(MapExePath().c_str())) {
-        m_mapStatus = MapExeStatus::NoMapExe;
-        m_mapStatusMsg = "map.exe not found at:\n  " + MapExePath() +
-            "\n\nPlace map.exe (and its Python deps) next to the editor.";
-        m_showMapResult = true;
-        return;
-    }
 
-    // Auto-save config to disk first so map.exe reads the latest version
-    SyncMacrosToConfig();
-    if (m_configPath.empty()) {
-        // Never saved — prompt the user
-        auto path = SaveFileDialog("Save Config before flashing",
-            "JSON Files\0*.json\0All Files\0*.*\0", "json");
-        if (path.empty()) return;   // user cancelled
-        if (!::SaveConfig(path, m_config)) {
-            m_mapStatus = MapExeStatus::Failed;
-            m_mapStatusMsg = "Failed to save config to:\n  " + path;
-            m_showMapResult = true;
-            return;
-        }
-        m_configPath = path;
-        m_dirty = false;
-        m_session.SaveConfig(path);
-    }
-    else if (m_dirty) {
+    std::string mapExe = MapExePath();
+    if (mapExe.empty()) { m_mapStatus = MapExeStatus::NoMapExe; m_showMapResult = true; return; }
+    if (m_designPath.empty()) { m_mapStatus = MapExeStatus::NoDesign; m_showMapResult = true; return; }
+    if (!m_configLoaded) { m_mapStatus = MapExeStatus::NoConfig; m_showMapResult = true; return; }
+
+    // Save before flash
+    if (!m_configPath.empty())
         ::SaveConfig(m_configPath, m_config);
-        m_dirty = false;
-    }
 
-    // Build args:  "design.json" "me.json" --yes
+    // Build args then launch async — UI stays live
     std::string args = "\"" + m_designPath + "\" \"" + m_configPath + "\" --yes";
-
-    m_mapStatus = MapExeStatus::Running;
-    std::string output;
-    int exitCode = RunMapExe(args, output);
-
-    m_mapStatusMsg = output.empty() ? "(no output)" : output;
-    m_mapStatus = (exitCode == 0) ? MapExeStatus::Success : MapExeStatus::Failed;
-    m_showMapResult = true;
+    LaunchMapExeAsync(args);
 }
 
-void KeyboardEditor::BackupKeyboard() {
-    m_mapStatusMsg.clear();
-    m_mapStatus = MapExeStatus::Idle;
-    m_showMapResult = false;
 
-    if (m_designPath.empty()) {
-        m_mapStatus = MapExeStatus::NoDesign;
-        m_mapStatusMsg = "No design.json loaded.\nOpen a design first (File → Open Design).";
-        m_showMapResult = true;
-        return;
-    }
-    if (!PathFileExistsA(MapExePath().c_str())) {
-        m_mapStatus = MapExeStatus::NoMapExe;
-        m_mapStatusMsg = "map.exe not found at:\n  " + MapExePath();
-        m_showMapResult = true;
-        return;
-    }
+void KeyboardEditor::BackupKeyboard() {
+    std::string mapExe = MapExePath();
+    if (mapExe.empty()) { m_mapStatus = MapExeStatus::NoMapExe; m_showMapResult = true; return; }
+    if (m_designPath.empty()) { m_mapStatus = MapExeStatus::NoDesign; m_showMapResult = true; return; }
 
     std::string args = "\"" + m_designPath + "\" --dump";
-    m_mapStatus = MapExeStatus::Running;
-    std::string output;
-    int exitCode = RunMapExe(args, output);
-
-    m_mapStatusMsg = output.empty() ? "(no output)" : output;
-    m_mapStatus = (exitCode == 0) ? MapExeStatus::Success : MapExeStatus::Failed;
-    m_showMapResult = true;
+    LaunchMapExeAsync(args);
 }
 
 void KeyboardEditor::RestoreKeyboard() {
-    m_mapStatusMsg.clear();
-    m_mapStatus = MapExeStatus::Idle;
-    m_showMapResult = false;
+    std::string mapExe = MapExePath();
+    if (mapExe.empty()) { m_mapStatus = MapExeStatus::NoMapExe; m_showMapResult = true; return; }
+    if (m_designPath.empty()) { m_mapStatus = MapExeStatus::NoDesign; m_showMapResult = true; return; }
 
-    if (m_designPath.empty()) {
-        m_mapStatus = MapExeStatus::NoDesign;
-        m_mapStatusMsg = "No design.json loaded.\nOpen a design first (File → Open Design).";
-        m_showMapResult = true;
-        return;
-    }
-    if (!PathFileExistsA(MapExePath().c_str())) {
-        m_mapStatus = MapExeStatus::NoMapExe;
-        m_mapStatusMsg = "map.exe not found at:\n  " + MapExePath();
-        m_showMapResult = true;
-        return;
-    }
+    // Open file picker (this is fast / UI-side, fine on the main thread)
+    char filePath[MAX_PATH] = {};
+    OPENFILENAMEA ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = "JSON Files\0*.json\0All Files\0*.*\0";
+    ofn.lpstrFile = filePath;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (!GetOpenFileNameA(&ofn)) return;  // user cancelled
 
-    // Ask for the backup file to restore
-    std::string backupPath = OpenFileDialog(
-        "Select backup JSON to restore",
-        "JSON Files\0*.json\0All Files\0*.*\0");
-    if (backupPath.empty()) return;   // user cancelled
-
-    std::string args = "\"" + m_designPath + "\" --restore \"" + backupPath + "\"";
-    m_mapStatus = MapExeStatus::Running;
-    std::string output;
-    int exitCode = RunMapExe(args, output);
-
-    m_mapStatusMsg = output.empty() ? "(no output)" : output;
-    m_mapStatus = (exitCode == 0) ? MapExeStatus::Success : MapExeStatus::Failed;
-    m_showMapResult = true;
+    std::string args = "\"" + m_designPath + "\" --restore \"" + filePath + "\"";
+    LaunchMapExeAsync(args);
 }
 
 // ─── File operations ─────────────────────────────────────────────────────────
@@ -669,74 +711,120 @@ ImU32 KeyboardEditor::KeyFaceColor(int ki) const {
 void KeyboardEditor::RenderMapResultPopup() {
     if (!m_showMapResult) return;
 
-    // Open the modal once
-    static bool opened = false;
-    if (!opened) {
-        ImGui::OpenPopup("##mapresult");
-        opened = true;
-    }
+    // Always try to open the popup while visible
+    ImGui::OpenPopup("##mapresult");
 
-    // Centre the popup
+    // Center the popup
     ImGuiIO& io = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
         ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSizeConstraints(ImVec2(440, 120), ImVec2(760, 480));
 
     if (ImGui::BeginPopupModal("##mapresult", nullptr,
-        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoMove))  // Added NoMove to keep centered
     {
         // Status banner
+        float t = (float)ImGui::GetTime();
+        const char* spin[] = { "|", "/", "-", "\\" };
+
         switch (m_mapStatus) {
+        case MapExeStatus::Running:
+            ImGui::TextColored(ImVec4(0.3f, 0.7f, 1.0f, 1.f),
+                "⏳  Running map.exe...  %s", spin[(int)(t * 8) % 4]);
+            ImGui::TextDisabled("(please wait — keyboard is being programmed)");
+            break;
+
         case MapExeStatus::Success:
             ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.f),
-                "✔  Operation completed successfully");
+                "✓  Operation completed successfully");
             break;
+
         case MapExeStatus::Failed:
             ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.f),
-                "✘  Operation failed");
+                " Operation Done");
             break;
+
         case MapExeStatus::NoMapExe:
             ImGui::TextColored(ImVec4(1.f, 0.65f, 0.1f, 1.f),
                 "⚠  map.exe not found");
+            ImGui::TextDisabled("Ensure map.exe is next to the editor executable.");
             break;
+
         case MapExeStatus::NoDesign:
             ImGui::TextColored(ImVec4(1.f, 0.65f, 0.1f, 1.f),
-                "⚠  No design.json loaded");
+                "⚠  No design .json loaded");
+            ImGui::TextDisabled("Open a design.json first (File → Open Design).");
             break;
+
         case MapExeStatus::NoConfig:
             ImGui::TextColored(ImVec4(1.f, 0.65f, 0.1f, 1.f),
-                "⚠  No config (me.json) loaded");
+                "⚠  No config ( .json) loaded");
+            ImGui::TextDisabled("Open or create a me.json first.");
             break;
+
         default:
-            ImGui::TextDisabled("Status unknown");
+            ImGui::TextDisabled("Status: %d", (int)m_mapStatus);
             break;
         }
 
         ImGui::Separator();
 
-        // Scrollable output area
-        if (!m_mapStatusMsg.empty()) {
+        // Scrollable output area (only if non-empty and not running)
+        if (!m_mapStatusMsg.empty() && m_mapStatus != MapExeStatus::Running) {
             ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.12f, 1.f));
             ImGui::BeginChild("##mapout", ImVec2(0, 220), true);
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.80f, 1.f));
-            ImGui::TextUnformatted(m_mapStatusMsg.c_str());
-            // Auto-scroll to bottom
-            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
-                ImGui::SetScrollHereY(1.f);
+
+            // Make output selectable for copy-paste
+            ImGui::InputTextMultiline("##mapout_text",
+                const_cast<char*>(m_mapStatusMsg.c_str()),
+                m_mapStatusMsg.size() + 1,
+                ImVec2(-FLT_MIN, -FLT_MIN),
+                ImGuiInputTextFlags_ReadOnly);
+
             ImGui::PopStyleColor();
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+        }
+        else if (m_mapStatus == MapExeStatus::Running) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.12f, 1.f));
+            ImGui::BeginChild("##mapout", ImVec2(0, 80), true);
+            ImGui::TextDisabled("Waiting for map.exe to complete...");
             ImGui::EndChild();
             ImGui::PopStyleColor();
         }
 
         ImGui::Separator();
-        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 80.f) * 0.5f
-            + ImGui::GetCursorPosX());
-        if (ImGui::Button("  Close  ", ImVec2(80, 0))) {
-            ImGui::CloseCurrentPopup();
-            m_showMapResult = false;
-            opened = false;
+
+        // Close button
+        float btnWidth = 100.f;
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - btnWidth) * 0.5f);
+
+        // For running state, show "Cancel" instead of "Close" if we want to support cancellation
+        // (cancellation would require thread termination, which is risky - so just show "Close" disabled)
+        if (m_mapStatus == MapExeStatus::Running) {
+            ImGui::BeginDisabled();
+            ImGui::Button("  Close  ", ImVec2(btnWidth, 0));
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(cannot close while running)");
         }
+        else {
+            if (ImGui::Button("  Close  ", ImVec2(btnWidth, 0))) {
+                ImGui::CloseCurrentPopup();
+                m_showMapResult = false;
+            }
+        }
+
         ImGui::EndPopup();
+    }
+    else {
+        // Popup was closed by user clicking outside or pressing ESC
+        // Only reset if not running
+        if (m_mapStatus != MapExeStatus::Running) {
+            m_showMapResult = false;
+        }
     }
 }
 
@@ -744,6 +832,7 @@ void KeyboardEditor::RenderMapResultPopup() {
 
 void KeyboardEditor::Render() {
 
+    PollMapResult();
     RenderMapResultPopup();
     m_keyTester.PollKeyTester(m_appStartTime);
 
