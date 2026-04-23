@@ -25,6 +25,8 @@ import os
 import json
 import datetime
 import re
+import atexit
+import gc
 
 # ─── Complete QMK Keycode Tables (Matched to Short-Name Design Style) ──────
 
@@ -80,6 +82,31 @@ for _name, _code in QMK_KEYCODES.items():
 
 EMPTY_KEY = "KC_NO"
 TRNS_KEY = "KC_TRNS"
+
+# Store API reference for cleanup
+_api = None
+_api_ref = None
+
+def cleanup():
+    """Force cleanup of HID resources and exit cleanly"""
+    global _api, _api_ref
+    try:
+        if _api is not None:
+            # Try to close any open device handles
+            if hasattr(_api, 'close'):
+                _api.close()
+            elif hasattr(_api, '_device') and hasattr(_api._device, 'close'):
+                _api._device.close()
+        if _api_ref is not None:
+            if hasattr(_api_ref, 'close'):
+                _api_ref.close()
+    except:
+        pass
+    # Force garbage collection
+    gc.collect()
+
+# Register cleanup to run on exit
+atexit.register(cleanup)
 
 # ─── Helper Functions for Dynamic Keycodes ──────────────────────────────────
 
@@ -169,13 +196,22 @@ def scan_all_devices():
         if d['usage_page'] == 0xFF60:
             print(f"  VID={d['vendor_id']:#06x} PID={d['product_id']:#06x} | {d['product_string']}")
     print("=" * 64 + "\n")
+    # Force hid module cleanup
+    if hasattr(hid, 'close'):
+        hid.close()
 
 def connect_keyboard(layout: Layout):
+    global _api, _api_ref
     from qmk_via_api import KeyboardApi, scan_keyboards
+    
     dev = next((d for d in scan_keyboards() if d.vendor_id == layout.vid and d.product_id == layout.pid), None)
-    if not dev: print("[ERROR] Keyboard not found."); sys.exit(1)
-    api = KeyboardApi(dev.vendor_id, dev.product_id, dev.usage_page)
-    return api, api.get_layer_count()
+    if not dev: 
+        print("[ERROR] Keyboard not found.")
+        sys.exit(1)
+    
+    _api_ref = dev  # Keep reference for cleanup
+    _api = KeyboardApi(dev.vendor_id, dev.product_id, dev.usage_page)
+    return _api, _api.get_layer_count()
 
 def read_flat_layers(api, kb_layers, layout):
     layers = []
@@ -186,7 +222,8 @@ def read_flat_layers(api, kb_layers, layout):
                 try:
                     val = api.get_key(li, r, c)
                     flat.append(int_to_kc(val))
-                except: flat.append(EMPTY_KEY)
+                except: 
+                    flat.append(EMPTY_KEY)
         layers.append(flat)
     return layers
 
@@ -197,11 +234,15 @@ def write_flat_layers_diff(api, kb_layers, layout, current, new, skip_confirm):
             r, c = i // layout.cols, i % layout.cols
             if current[li][i] != new[li][i]:
                 changes.append((li, r, c, new[li][i]))
-    if not changes: print("  Already matches file."); return 0
-    if not skip_confirm and input(f"  Write {len(changes)} keys? [y/N] ").lower() != 'y': return -1
+    if not changes: 
+        print("  Already matches file.")
+        return 0
+    if not skip_confirm and input(f"  Write {len(changes)} keys? [y/N] ").lower() != 'y': 
+        return -1
     for li, r, c, kc in changes:
         api.set_key(li, r, c, kc_to_int(kc))
-    print("[+] Written."); return len(changes)
+    print("[+] Written.")
+    return len(changes)
 
 # ─── Standard DOIO JSON format ────────────────────────────────────────────────
 
@@ -217,33 +258,89 @@ def make_standard_json(flat_layers, layout, definition):
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 def cmd_dump(definition_path, out_path=None):
-    dfn = load_json(definition_path); lyt = Layout(dfn)
-    api, kb_layers = connect_keyboard(lyt); layers = read_flat_layers(api, kb_layers, lyt)
-    if not out_path: out_path = f"me_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    global _api
+    dfn = load_json(definition_path)
+    lyt = Layout(dfn)
+    api, kb_layers = connect_keyboard(lyt)
+    layers = read_flat_layers(api, kb_layers, lyt)
+    if not out_path: 
+        out_path = f"me_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     data = make_standard_json(layers, lyt, dfn)
-    save_json(data, out_path); print(f"[+] Saved: {out_path}")
+    save_json(data, out_path)
+    print(f"[+] Saved: {out_path}")
+    
+    # Close HID connection explicitly
+    try:
+        if hasattr(api, 'close'):
+            api.close()
+    except:
+        pass
 
 def cmd_flash(definition_path, keymap_path, skip_backup=False, skip_confirm=False):
-    dfn = load_json(definition_path); kmp = load_json(keymap_path); lyt = Layout(dfn)
-    api, kb_layers = connect_keyboard(lyt); current = read_flat_layers(api, kb_layers, lyt)
+    global _api
+    dfn = load_json(definition_path)
+    kmp = load_json(keymap_path)
+    lyt = Layout(dfn)
+    api, kb_layers = connect_keyboard(lyt)
+    current = read_flat_layers(api, kb_layers, lyt)
+    
     if not skip_backup:
         bak = make_standard_json(current, lyt, dfn)
         save_json(bak, f"me_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
-    write_flat_layers_diff(api, kb_layers, lyt, current, detect_and_normalise_layers(kmp.get("layers", []), lyt), skip_confirm)
+    
+    write_flat_layers_diff(api, kb_layers, lyt, current, 
+                          detect_and_normalise_layers(kmp.get("layers", []), lyt), 
+                          skip_confirm)
+    
+    # Close HID connection explicitly
+    try:
+        if hasattr(api, 'close'):
+            api.close()
+    except:
+        pass
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
     args = sys.argv[1:]
-    if "--scan" in args: scan_all_devices(); return
-    if not args: print(__doc__); return
-    dfn_path = args[0]
-    if "--dump" in args: cmd_dump(dfn_path)
-    elif "--export" in args: cmd_dump(dfn_path, "me.json")
-    elif "--restore" in args: cmd_flash(dfn_path, args[args.index("--restore")+1], skip_backup=True)
-    else:
-        kmp = args[1] if len(args) > 1 and not args[1].startswith("-") else "me.json"
-        cmd_flash(dfn_path, kmp, "--no-backup" in args, "--yes" in args)
-    input("\nPress Enter to exit...")
+    
+    # Check for --yes flag (non-interactive mode)
+    non_interactive = "--yes" in args
+    
+    try:
+        if "--scan" in args: 
+            scan_all_devices()
+            return
+            
+        if not args: 
+            print(__doc__)
+            return
+            
+        dfn_path = args[0]
+        
+        if "--dump" in args: 
+            cmd_dump(dfn_path)
+        elif "--export" in args: 
+            cmd_dump(dfn_path, "me.json")
+        elif "--restore" in args: 
+            cmd_flash(dfn_path, args[args.index("--restore")+1], skip_backup=True)
+        else:
+            kmp = args[1] if len(args) > 1 and not args[1].startswith("-") else "me.json"
+            cmd_flash(dfn_path, kmp, "--no-backup" in args, "--yes" in args)
+        
+    except Exception as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        # Always clean up resources
+        cleanup()
+    
+    # Skip the "Press Enter" prompt in non-interactive mode
+    if not non_interactive:
+        try:
+            input("\nPress Enter to exit...")
+        except:
+            pass
 
-if __name__ == "__main__": main()
+if __name__ == "__main__": 
+    main()
