@@ -12,6 +12,8 @@
 #include <commdlg.h>
 #include <shlwapi.h>
 #include <sstream>
+#pragma warning(disable: 6262)  // large stack frame — acceptable for ImGui render functions
+
 
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -36,25 +38,25 @@ static std::string OpenFileDialog(const char* title, const char* filter) {
     OPENFILENAMEA ofn = {};
     ofn.lStructSize = sizeof(ofn);
     ofn.lpstrFilter = filter;
-    ofn.lpstrFile   = buf;
-    ofn.nMaxFile    = MAX_PATH;
-    ofn.lpstrTitle  = title;
-    ofn.Flags       = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = title;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn)) return buf;
     return {};
 }
 
 static std::string SaveFileDialog(const char* title, const char* filter,
-                                  const char* defaultExt) {
+    const char* defaultExt) {
     char buf[MAX_PATH] = {};
     OPENFILENAMEA ofn = {};
-    ofn.lStructSize  = sizeof(ofn);
-    ofn.lpstrFilter  = filter;
-    ofn.lpstrFile    = buf;
-    ofn.nMaxFile     = MAX_PATH;
-    ofn.lpstrTitle   = title;
-    ofn.lpstrDefExt  = defaultExt;
-    ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrTitle = title;
+    ofn.lpstrDefExt = defaultExt;
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     if (GetSaveFileNameA(&ofn)) return buf;
     return {};
 }
@@ -98,6 +100,7 @@ bool KeyboardEditor::TryAutoLoad(const std::string& designPath,
         if (LoadDesign(designPath, tmp)) {
             m_layout = std::move(tmp);
             m_layoutLoaded = true;
+            m_designPath = designPath;
             m_selectedKey = -1;
             EnsureLayerSchemes();
             ok = true;
@@ -106,7 +109,7 @@ bool KeyboardEditor::TryAutoLoad(const std::string& designPath,
 
     if (!configPath.empty()) {
         KeyboardConfig tmp;
-        if (LoadConfig(configPath, tmp)) {
+        if (LoadConfig(configPath, m_layout, tmp)) {
             m_config = std::move(tmp);
             m_configLoaded = true;
             m_configPath = configPath;
@@ -124,6 +127,210 @@ bool KeyboardEditor::TryAutoLoad(const std::string& designPath,
     return ok;
 }
 
+
+std::string KeyboardEditor::MapExePath() const {
+    char exe[MAX_PATH] = {};
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string p(exe);
+    auto slash = p.find_last_of("\\/");
+    if (slash != std::string::npos) p = p.substr(0, slash + 1);
+    return p + "map.exe";
+}
+
+int KeyboardEditor::RunMapExe(const std::string& args, std::string& outMsg) {
+    outMsg.clear();
+
+    std::string mapExe = MapExePath();
+
+    // Build full command line: "map.exe" <args>
+    std::string cmdLine = "\"" + mapExe + "\" " + args;
+
+    // Pipe for child stdout + stderr
+    HANDLE hReadPipe = nullptr, hWritePipe = nullptr;
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+        outMsg = "[error] Could not create pipe.";
+        return -1;
+    }
+    // Don't inherit the read end
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.wShowWindow = SW_HIDE;   // hide the console window
+
+    PROCESS_INFORMATION pi{};
+    std::vector<char> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back('\0');
+
+    BOOL ok = CreateProcessA(
+        nullptr,          // no module name — use cmdLine
+        cmdBuf.data(),
+        nullptr, nullptr,
+        TRUE,             // inherit handles
+        CREATE_NO_WINDOW, // no console flicker
+        nullptr, nullptr,
+        &si, &pi);
+
+    CloseHandle(hWritePipe); // close write end in parent so ReadFile ends
+
+    if (!ok) {
+        CloseHandle(hReadPipe);
+        outMsg = "[error] Could not launch map.exe.\n"
+            "Make sure map.exe is in the same folder as the editor.";
+        return -2;
+    }
+
+    // Read all output
+    char buf[1024];
+    DWORD nRead = 0;
+    while (ReadFile(hReadPipe, buf, sizeof(buf) - 1, &nRead, nullptr) && nRead > 0) {
+        buf[nRead] = '\0';
+        outMsg += buf;
+        if (outMsg.size() > 8192) {   // cap at ~8 KB
+            outMsg += "\n... (output truncated) ...";
+            break;
+        }
+    }
+    CloseHandle(hReadPipe);
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    return (int)exitCode;
+}
+
+void KeyboardEditor::FlashToKeyboard() {
+    m_mapStatusMsg.clear();
+    m_mapStatus = MapExeStatus::Idle;
+    m_showMapResult = false;
+
+    // Validate prerequisites
+    if (m_designPath.empty()) {
+        m_mapStatus = MapExeStatus::NoDesign;
+        m_mapStatusMsg = "No design.json loaded.\nOpen a design first (File → Open Design).";
+        m_showMapResult = true;
+        return;
+    }
+    if (!m_configLoaded) {
+        m_mapStatus = MapExeStatus::NoConfig;
+        m_mapStatusMsg = "No config (me.json) loaded.\nOpen or save a config first.";
+        m_showMapResult = true;
+        return;
+    }
+    if (!PathFileExistsA(MapExePath().c_str())) {
+        m_mapStatus = MapExeStatus::NoMapExe;
+        m_mapStatusMsg = "map.exe not found at:\n  " + MapExePath() +
+            "\n\nPlace map.exe (and its Python deps) next to the editor.";
+        m_showMapResult = true;
+        return;
+    }
+
+    // Auto-save config to disk first so map.exe reads the latest version
+    SyncMacrosToConfig();
+    if (m_configPath.empty()) {
+        // Never saved — prompt the user
+        auto path = SaveFileDialog("Save Config before flashing",
+            "JSON Files\0*.json\0All Files\0*.*\0", "json");
+        if (path.empty()) return;   // user cancelled
+        if (!::SaveConfig(path, m_config)) {
+            m_mapStatus = MapExeStatus::Failed;
+            m_mapStatusMsg = "Failed to save config to:\n  " + path;
+            m_showMapResult = true;
+            return;
+        }
+        m_configPath = path;
+        m_dirty = false;
+        m_session.SaveConfig(path);
+    }
+    else if (m_dirty) {
+        ::SaveConfig(m_configPath, m_config);
+        m_dirty = false;
+    }
+
+    // Build args:  "design.json" "me.json" --yes
+    std::string args = "\"" + m_designPath + "\" \"" + m_configPath + "\" --yes";
+
+    m_mapStatus = MapExeStatus::Running;
+    std::string output;
+    int exitCode = RunMapExe(args, output);
+
+    m_mapStatusMsg = output.empty() ? "(no output)" : output;
+    m_mapStatus = (exitCode == 0) ? MapExeStatus::Success : MapExeStatus::Failed;
+    m_showMapResult = true;
+}
+
+void KeyboardEditor::BackupKeyboard() {
+    m_mapStatusMsg.clear();
+    m_mapStatus = MapExeStatus::Idle;
+    m_showMapResult = false;
+
+    if (m_designPath.empty()) {
+        m_mapStatus = MapExeStatus::NoDesign;
+        m_mapStatusMsg = "No design.json loaded.\nOpen a design first (File → Open Design).";
+        m_showMapResult = true;
+        return;
+    }
+    if (!PathFileExistsA(MapExePath().c_str())) {
+        m_mapStatus = MapExeStatus::NoMapExe;
+        m_mapStatusMsg = "map.exe not found at:\n  " + MapExePath();
+        m_showMapResult = true;
+        return;
+    }
+
+    std::string args = "\"" + m_designPath + "\" --dump";
+    m_mapStatus = MapExeStatus::Running;
+    std::string output;
+    int exitCode = RunMapExe(args, output);
+
+    m_mapStatusMsg = output.empty() ? "(no output)" : output;
+    m_mapStatus = (exitCode == 0) ? MapExeStatus::Success : MapExeStatus::Failed;
+    m_showMapResult = true;
+}
+
+void KeyboardEditor::RestoreKeyboard() {
+    m_mapStatusMsg.clear();
+    m_mapStatus = MapExeStatus::Idle;
+    m_showMapResult = false;
+
+    if (m_designPath.empty()) {
+        m_mapStatus = MapExeStatus::NoDesign;
+        m_mapStatusMsg = "No design.json loaded.\nOpen a design first (File → Open Design).";
+        m_showMapResult = true;
+        return;
+    }
+    if (!PathFileExistsA(MapExePath().c_str())) {
+        m_mapStatus = MapExeStatus::NoMapExe;
+        m_mapStatusMsg = "map.exe not found at:\n  " + MapExePath();
+        m_showMapResult = true;
+        return;
+    }
+
+    // Ask for the backup file to restore
+    std::string backupPath = OpenFileDialog(
+        "Select backup JSON to restore",
+        "JSON Files\0*.json\0All Files\0*.*\0");
+    if (backupPath.empty()) return;   // user cancelled
+
+    std::string args = "\"" + m_designPath + "\" --restore \"" + backupPath + "\"";
+    m_mapStatus = MapExeStatus::Running;
+    std::string output;
+    int exitCode = RunMapExe(args, output);
+
+    m_mapStatusMsg = output.empty() ? "(no output)" : output;
+    m_mapStatus = (exitCode == 0) ? MapExeStatus::Success : MapExeStatus::Failed;
+    m_showMapResult = true;
+}
+
 // ─── File operations ─────────────────────────────────────────────────────────
 
 void KeyboardEditor::OpenDesign() {
@@ -135,8 +342,9 @@ void KeyboardEditor::OpenDesign() {
         m_layout = std::move(tmp);
         m_layoutLoaded = true;
         m_selectedKey = -1;
+        m_designPath = path;          // ← NEW: keep for map.exe
         EnsureLayerSchemes();
-        m_session.SaveDesign(path);   // ← persist
+        m_session.SaveDesign(path);
     }
 }
 
@@ -145,7 +353,7 @@ void KeyboardEditor::OpenConfig() {
         "JSON Files\0*.json\0All Files\0*.*\0");
     if (path.empty()) return;
     KeyboardConfig tmp;
-    if (LoadConfig(path, tmp)) {
+    if (LoadConfig(path, m_layout, tmp)) {
         m_config = std::move(tmp);
         m_configLoaded = true;
         m_configPath = path;
@@ -197,11 +405,11 @@ void KeyboardEditor::ApplyKeycode(int keyIdx, const std::string& code) {
     if (!m_configLoaded || !m_layoutLoaded) return;
     if (keyIdx < 0 || keyIdx >= (int)m_layout.keys.size()) return;
     const MatrixPos& mp = m_layout.keys[keyIdx].matrix;
-    int fi = m_layout.ConfigIndex(mp);
-    if (fi < 0 || fi >= m_config.KeyCount()) return;
+    int fi = m_layout.FlatIndex(mp);
+    if (fi < 0 || fi >= m_config.FlatSize()) return;
 
     UndoRecord r;
-    r.layer   = m_currentLayer;
+    r.layer = m_currentLayer;
     r.flatIdx = fi;
     r.oldCode = m_config.Keycode(m_currentLayer, fi);
     r.newCode = code;
@@ -315,33 +523,39 @@ void KeyboardEditor::ParseMacrosFromConfig() {
             while (pos < raw.size()) {
                 size_t sep = raw.find(" | ", pos);
                 std::string token = raw.substr(pos, sep == std::string::npos
-                                               ? std::string::npos
-                                               : sep - pos);
+                    ? std::string::npos
+                    : sep - pos);
                 pos = sep == std::string::npos ? raw.size() : sep + 3;
 
                 MacroAction act;
                 if (token.rfind("TAP:", 0) == 0) {
                     act.type = MacroActionType::KeyTap;
                     act.keycode = token.substr(4);
-                } else if (token.rfind("KEYDOWN:", 0) == 0) {
+                }
+                else if (token.rfind("KEYDOWN:", 0) == 0) {
                     act.type = MacroActionType::KeyDown;
                     act.keycode = token.substr(8);
-                } else if (token.rfind("KEYUP:", 0) == 0) {
+                }
+                else if (token.rfind("KEYUP:", 0) == 0) {
                     act.type = MacroActionType::KeyUp;
                     act.keycode = token.substr(6);
-                } else if (token.rfind("TYPE:", 0) == 0) {
+                }
+                else if (token.rfind("TYPE:", 0) == 0) {
                     act.type = MacroActionType::TypeString;
                     act.text = token.substr(5);
-                } else if (token.rfind("DELAY:", 0) == 0) {
+                }
+                else if (token.rfind("DELAY:", 0) == 0) {
                     act.type = MacroActionType::Delay;
                     act.delayMs = std::stoi(token.substr(6));
-                } else if (!token.empty()) {
+                }
+                else if (!token.empty()) {
                     act.type = MacroActionType::TypeString;
                     act.text = token;
                 }
                 if (!token.empty()) m_macros[i].actions.push_back(act);
             }
-        } else if (!raw.empty()) {
+        }
+        else if (!raw.empty()) {
             MacroAction act;
             act.type = MacroActionType::TypeString;
             act.text = raw;
@@ -353,7 +567,7 @@ void KeyboardEditor::ParseMacrosFromConfig() {
 // ─── LED scheme helpers ───────────────────────────────────────────────────────
 
 void KeyboardEditor::EnsureLayerSchemes() {
-    int n =  max(m_config.LayerCount(), m_layoutLoaded ? 1 : 0);
+    int n = max(m_config.LayerCount(), m_layoutLoaded ? 1 : 0);
     if (n == 0) n = 1;
 
     if (m_configLoaded) {
@@ -363,11 +577,12 @@ void KeyboardEditor::EnsureLayerSchemes() {
             // Default: pick predefined scheme by layer index cycling through palettes
             if (!m_predefinedSchemes.empty()) {
                 ls = m_predefinedSchemes[li % m_predefinedSchemes.size()];
-            } else {
+            }
+            else {
                 ls.name = "Layer " + std::to_string(li);
                 ls.type = LedSchemeType::Solid;
                 const float* c = kLayerColors[li % kMaxLayers];
-                ls.primary = {c[0], c[1], c[2]};
+                ls.primary = { c[0], c[1], c[2] };
             }
             m_config.ledSchemes.push_back(ls);
         }
@@ -381,7 +596,7 @@ ImU32 KeyboardEditor::KeyFaceColor(int ki) const {
     if (ki == m_selectedKey) return IM_COL32(220, 180, 20, 255);
 
     const PhysicalKey& pk = m_layout.keys[ki];
-    int fi = m_layout.ConfigIndex(pk.matrix);
+    int fi = m_layout.FlatIndex(pk.matrix);
     const std::string& kc = m_config.Keycode(m_currentLayer, fi);
 
     if (kc == "KC_TRNS" || kc == "KC_NO")
@@ -401,8 +616,8 @@ ImU32 KeyboardEditor::KeyFaceColor(int ki) const {
     case LedSchemeType::Rainbow: {
         // Map key x position to hue
         float t = (m_layout.totalW > 0.f)
-                  ? (pk.x / m_layout.totalW)
-                  : 0.f;
+            ? (pk.x / m_layout.totalW)
+            : 0.f;
         // Simple HSV→RGB for hue sweep
         float h = t * 360.f;
         float s = 0.9f, v = br;
@@ -411,51 +626,125 @@ ImU32 KeyboardEditor::KeyFaceColor(int ki) const {
         float r = 0, g = 0, b = 0;
         int seg = (int)(h / 60.f) % 6;
         switch (seg) {
-        case 0: r=c2; g=x2; break;
-        case 1: r=x2; g=c2; break;
-        case 2: g=c2; b=x2; break;
-        case 3: g=x2; b=c2; break;
-        case 4: r=x2; b=c2; break;
-        case 5: r=c2; b=x2; break;
+        case 0: r = c2; g = x2; break;
+        case 1: r = x2; g = c2; break;
+        case 2: g = c2; b = x2; break;
+        case 3: g = x2; b = c2; break;
+        case 4: r = x2; b = c2; break;
+        case 5: r = c2; b = x2; break;
         }
-        return IM_COL32((uint8_t)((r+(v-c2))*160),
-                        (uint8_t)((g+(v-c2))*160),
-                        (uint8_t)((b+(v-c2))*160), 255);
+        return IM_COL32((uint8_t)((r + (v - c2)) * 160),
+            (uint8_t)((g + (v - c2)) * 160),
+            (uint8_t)((b + (v - c2)) * 160), 255);
     }
     case LedSchemeType::RainbowWave: {
         float t = fmodf((float)ImGui::GetTime() * scheme.speed * 0.3f
-                        + pk.x / (m_layout.totalW > 0 ? m_layout.totalW : 1.f), 1.f);
+            + pk.x / (m_layout.totalW > 0 ? m_layout.totalW : 1.f), 1.f);
         float h = t * 360.f;
-        float c2 = br, x2 = c2 * (1.f - fabsf(fmodf(h/60.f,2.f)-1.f));
-        float r=0,g=0,b=0;
-        int seg = (int)(h/60.f)%6;
-        switch(seg){
-        case 0:r=c2;g=x2;break; case 1:r=x2;g=c2;break;
-        case 2:g=c2;b=x2;break; case 3:g=x2;b=c2;break;
-        case 4:r=x2;b=c2;break; case 5:r=c2;b=x2;break;
+        float c2 = br, x2 = c2 * (1.f - fabsf(fmodf(h / 60.f, 2.f) - 1.f));
+        float r = 0, g = 0, b = 0;
+        int seg = (int)(h / 60.f) % 6;
+        switch (seg) {
+        case 0:r = c2; g = x2; break; case 1:r = x2; g = c2; break;
+        case 2:g = c2; b = x2; break; case 3:g = x2; b = c2; break;
+        case 4:r = x2; b = c2; break; case 5:r = c2; b = x2; break;
         }
-        return IM_COL32((uint8_t)(r*200),(uint8_t)(g*200),(uint8_t)(b*200),255);
+        return IM_COL32((uint8_t)(r * 200), (uint8_t)(g * 200), (uint8_t)(b * 200), 255);
     }
     case LedSchemeType::Breathing: {
         float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime()
-                                          * scheme.speed * 2.f);
+            * scheme.speed * 2.f);
         float scale = (0.4f + 0.6f * pulse) * br;
         return IM_COL32((uint8_t)(p.r * scale * 220),
-                        (uint8_t)(p.g * scale * 220),
-                        (uint8_t)(p.b * scale * 220), 255);
+            (uint8_t)(p.g * scale * 220),
+            (uint8_t)(p.b * scale * 220), 255);
     }
     default:
         return IM_COL32((uint8_t)(p.r * br * 160),
-                        (uint8_t)(p.g * br * 160),
-                        (uint8_t)(p.b * br * 160), 255);
+            (uint8_t)(p.g * br * 160),
+            (uint8_t)(p.b * br * 160), 255);
     }
 }
 
-// ─── Key Tester polling ───────────────────────────────────────────────────────
+void KeyboardEditor::RenderMapResultPopup() {
+    if (!m_showMapResult) return;
+
+    // Open the modal once
+    static bool opened = false;
+    if (!opened) {
+        ImGui::OpenPopup("##mapresult");
+        opened = true;
+    }
+
+    // Centre the popup
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+        ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(440, 120), ImVec2(760, 480));
+
+    if (ImGui::BeginPopupModal("##mapresult", nullptr,
+        ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+    {
+        // Status banner
+        switch (m_mapStatus) {
+        case MapExeStatus::Success:
+            ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.f),
+                "✔  Operation completed successfully");
+            break;
+        case MapExeStatus::Failed:
+            ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.f),
+                "✘  Operation failed");
+            break;
+        case MapExeStatus::NoMapExe:
+            ImGui::TextColored(ImVec4(1.f, 0.65f, 0.1f, 1.f),
+                "⚠  map.exe not found");
+            break;
+        case MapExeStatus::NoDesign:
+            ImGui::TextColored(ImVec4(1.f, 0.65f, 0.1f, 1.f),
+                "⚠  No design.json loaded");
+            break;
+        case MapExeStatus::NoConfig:
+            ImGui::TextColored(ImVec4(1.f, 0.65f, 0.1f, 1.f),
+                "⚠  No config (me.json) loaded");
+            break;
+        default:
+            ImGui::TextDisabled("Status unknown");
+            break;
+        }
+
+        ImGui::Separator();
+
+        // Scrollable output area
+        if (!m_mapStatusMsg.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.12f, 1.f));
+            ImGui::BeginChild("##mapout", ImVec2(0, 220), true);
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.85f, 0.80f, 1.f));
+            ImGui::TextUnformatted(m_mapStatusMsg.c_str());
+            // Auto-scroll to bottom
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+                ImGui::SetScrollHereY(1.f);
+            ImGui::PopStyleColor();
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Separator();
+        ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - 80.f) * 0.5f
+            + ImGui::GetCursorPosX());
+        if (ImGui::Button("  Close  ", ImVec2(80, 0))) {
+            ImGui::CloseCurrentPopup();
+            m_showMapResult = false;
+            opened = false;
+        }
+        ImGui::EndPopup();
+    }
+}
 
 // ─── Main Render ─────────────────────────────────────────────────────────────
 
 void KeyboardEditor::Render() {
+
+    RenderMapResultPopup();
     m_keyTester.PollKeyTester(m_appStartTime);
 
     ImGuiWindowFlags wf = ImGuiWindowFlags_NoCollapse;
@@ -525,7 +814,7 @@ void KeyboardEditor::RenderLayerPanel() {
     for (int i = 0; i < m_config.LayerCount(); ++i) {
         const float* c = kLayerColors[i % kMaxLayers];
         ImVec4 col(c[0], c[1], c[2], 1.f);
-        ImVec4 colDim(c[0]*0.5f, c[1]*0.5f, c[2]*0.5f, 1.f);
+        ImVec4 colDim(c[0] * 0.5f, c[1] * 0.5f, c[2] * 0.5f, 1.f);
 
         if (m_currentLayer == i) ImGui::PushStyleColor(ImGuiCol_Button, col);
         else                     ImGui::PushStyleColor(ImGuiCol_Button, colDim);
@@ -548,9 +837,9 @@ void KeyboardEditor::RenderKeyboardPanel() {
         return;
     }
 
-    ImVec2 avail   = ImGui::GetContentRegionAvail();
+    ImVec2 avail = ImGui::GetContentRegionAvail();
     float  keyUnit = min(avail.x / (m_layout.totalW + 0.5f),
-                         avail.y / (m_layout.totalH + 0.5f));
+        avail.y / (m_layout.totalH + 0.5f));
     keyUnit = max(keyUnit, 20.f);
     keyUnit = min(keyUnit, 80.f);
 
@@ -558,15 +847,15 @@ void KeyboardEditor::RenderKeyboardPanel() {
     float originY = ImGui::GetCursorScreenPos().y + 12.f;
 
     ImGui::Dummy(ImVec2(m_layout.totalW * keyUnit + 24.f,
-                        m_layout.totalH * keyUnit + 24.f));
+        m_layout.totalH * keyUnit + 24.f));
 
     DrawKeyboard(originX, originY, keyUnit);
 }
 
 void KeyboardEditor::DrawKeyboard(float ox, float oy, float ku) {
-    ImDrawList* dl  = ImGui::GetWindowDrawList();
-    ImGuiIO&    io  = ImGui::GetIO();
-    const float pad     = 3.f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImGuiIO& io = ImGui::GetIO();
+    const float pad = 3.f;
     const float rounding = 5.f;
 
     ImU32 selBorder = IM_COL32(255, 240, 100, 255);
@@ -579,26 +868,27 @@ void KeyboardEditor::DrawKeyboard(float ox, float oy, float ku) {
 
         std::string kc = "---";
         if (m_configLoaded) {
-            int fi = m_layout.ConfigIndex(pk.matrix);
+            int fi = m_layout.FlatIndex(pk.matrix);
             kc = m_config.Keycode(m_currentLayer, fi);
         }
 
-        ImU32 faceCol  = KeyFaceColor(ki);
+        ImU32 faceCol = KeyFaceColor(ki);
         ImU32 borderCol;
         if (ki == m_selectedKey) {
             borderCol = selBorder;
-        } else {
+        }
+        else {
             // Slightly lighter version of face for border
             borderCol = IM_COL32(
-                 min(255, (int)(((faceCol >> 0)  & 0xFF) + 60)),
-                 min(255, (int)(((faceCol >> 8)  & 0xFF) + 60)),
-                 min(255, (int)(((faceCol >> 16) & 0xFF) + 60)),
+                min(255, (int)(((faceCol >> 0) & 0xFF) + 60)),
+                min(255, (int)(((faceCol >> 8) & 0xFF) + 60)),
+                min(255, (int)(((faceCol >> 16) & 0xFF) + 60)),
                 255);
         }
 
         // Shadow
-        dl->AddRectFilled(ImVec2(tl.x+2,tl.y+2), ImVec2(br.x+2,br.y+2),
-                          IM_COL32(0,0,0,100), rounding);
+        dl->AddRectFilled(ImVec2(tl.x + 2, tl.y + 2), ImVec2(br.x + 2, br.y + 2),
+            IM_COL32(0, 0, 0, 100), rounding);
         // Face
         dl->AddRectFilled(tl, br, faceCol, rounding);
         // Border
@@ -607,7 +897,7 @@ void KeyboardEditor::DrawKeyboard(float ox, float oy, float ku) {
         // Matrix badge
         char badge[16];
         snprintf(badge, sizeof(badge), "%d,%d", pk.matrix.row, pk.matrix.col);
-        dl->AddText(ImVec2(tl.x+3, tl.y+3), IM_COL32(180,180,180,100), badge);
+        dl->AddText(ImVec2(tl.x + 3, tl.y + 3), IM_COL32(180, 180, 180, 100), badge);
 
         // Label
         std::string label = GetKeycodeLabel(kc, m_keycodeMap);
@@ -615,16 +905,16 @@ void KeyboardEditor::DrawKeyboard(float ox, float oy, float ku) {
         float cx = tl.x + (br.x - tl.x - tsz.x) * 0.5f;
         float cy = tl.y + (br.y - tl.y - tsz.y) * 0.5f;
         ImU32 textCol = (ki == m_selectedKey)
-                        ? IM_COL32(30,20,0,255)
-                        : IM_COL32(230,230,230,255);
+            ? IM_COL32(30, 20, 0, 255)
+            : IM_COL32(230, 230, 230, 255);
         dl->AddText(ImVec2(cx, cy), textCol, label.c_str());
 
         // Mouse interaction
         ImVec2 mpos = io.MousePos;
         bool hovered = mpos.x >= tl.x && mpos.x < br.x &&
-                       mpos.y >= tl.y && mpos.y < br.y;
+            mpos.y >= tl.y && mpos.y < br.y;
         if (hovered) {
-            dl->AddRect(tl, br, IM_COL32(255,255,255,180), rounding, 0, 2.5f);
+            dl->AddRect(tl, br, IM_COL32(255, 255, 255, 180), rounding, 0, 2.5f);
             ImGui::SetTooltip("[%d,%d]  %s", pk.matrix.row, pk.matrix.col, kc.c_str());
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                 m_selectedKey = ki;
@@ -645,12 +935,12 @@ void KeyboardEditor::RenderKeycodePanel() {
     }
 
     const PhysicalKey& pk = m_layout.keys[m_selectedKey];
-    int fi = m_layout.ConfigIndex(pk.matrix);
+    int fi = m_layout.FlatIndex(pk.matrix);
     const std::string& cur = m_config.Keycode(m_currentLayer, fi);
 
     ImGui::Text("Selected:  [%d,%d]", pk.matrix.row, pk.matrix.col);
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.f,0.9f,0.3f,1.f), "  %s", cur.c_str());
+    ImGui::TextColored(ImVec4(1.f, 0.9f, 0.3f, 1.f), "  %s", cur.c_str());
 
     ImGui::Separator();
     ImGui::Text("Copy from layer:");
@@ -668,14 +958,14 @@ void KeyboardEditor::RenderKeycodePanel() {
     ImGui::InputText("##search", m_searchBuf, sizeof(m_searchBuf));
 
     {
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4,2));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
         if (ImGui::RadioButton("All", m_selectedCategory == -1))
             m_selectedCategory = -1;
         for (int ci = 0; ci < (int)KeyCategory::COUNT; ++ci) {
             ImGui::SameLine();
             if (ImGui::RadioButton(CategoryName((KeyCategory)ci), m_selectedCategory == ci))
                 m_selectedCategory = ci;
-            if ((ci+1) % 4 == 0) ImGui::NewLine();
+            if ((ci + 1) % 4 == 0) ImGui::NewLine();
         }
         ImGui::PopStyleVar();
         ImGui::Separator();
@@ -684,25 +974,25 @@ void KeyboardEditor::RenderKeycodePanel() {
     std::string search(m_searchBuf);
     std::transform(search.begin(), search.end(), search.begin(), ::tolower);
 
-    ImGui::BeginChild("##kclist", ImVec2(0,0), false,
-                      ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::BeginChild("##kclist", ImVec2(0, 0), false,
+        ImGuiWindowFlags_HorizontalScrollbar);
 
     int col = 0, ncols = 3;
-    float btnW = (ImGui::GetContentRegionAvail().x - (ncols-1)*4) / ncols;
+    float btnW = (ImGui::GetContentRegionAvail().x - (ncols - 1) * 4) / ncols;
 
     for (const auto& def : m_keycodeDb) {
         if (m_selectedCategory >= 0 && (int)def.category != m_selectedCategory) continue;
         if (!search.empty()) {
-            std::string lc = def.code;  std::transform(lc.begin(),lc.end(),lc.begin(),::tolower);
-            std::string ll = def.label; std::transform(ll.begin(),ll.end(),ll.begin(),::tolower);
-            std::string lt = def.tooltip; std::transform(lt.begin(),lt.end(),lt.begin(),::tolower);
-            if (lc.find(search)==std::string::npos &&
-                ll.find(search)==std::string::npos &&
-                lt.find(search)==std::string::npos) continue;
+            std::string lc = def.code;  std::transform(lc.begin(), lc.end(), lc.begin(), ::tolower);
+            std::string ll = def.label; std::transform(ll.begin(), ll.end(), ll.begin(), ::tolower);
+            std::string lt = def.tooltip; std::transform(lt.begin(), lt.end(), lt.begin(), ::tolower);
+            if (lc.find(search) == std::string::npos &&
+                ll.find(search) == std::string::npos &&
+                lt.find(search) == std::string::npos) continue;
         }
 
         bool isCur = (def.code == cur);
-        if (isCur) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f,0.7f,0.1f,1.f));
+        if (isCur) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.7f, 0.1f, 1.f));
 
         if (col > 0 && col < ncols) ImGui::SameLine();
         ImGui::PushID(def.code.c_str());
@@ -712,7 +1002,7 @@ void KeyboardEditor::RenderKeycodePanel() {
             ImGui::SetTooltip("%s\n%s", def.code.c_str(), def.tooltip.c_str());
         ImGui::PopID();
         if (isCur) ImGui::PopStyleColor();
-        col = (col+1) % ncols;
+        col = (col + 1) % ncols;
     }
 
     ImGui::Separator();
@@ -738,7 +1028,7 @@ void KeyboardEditor::RenderKeycodePanel() {
         ImGui::PushID(lbl);
         if (ImGui::SmallButton(lbl)) ApplyKeycode(m_selectedKey, lbl);
         ImGui::PopID();
-        if ((i+1) % 4 != 0) ImGui::SameLine(); else ImGui::NewLine();
+        if ((i + 1) % 4 != 0) ImGui::SameLine(); else ImGui::NewLine();
     }
 
     if (!m_macros.empty()) {
@@ -755,7 +1045,7 @@ void KeyboardEditor::RenderKeycodePanel() {
                 ImGui::SetTooltip("%s\n%s", m_macros[mi].name.c_str(), summary.c_str());
             }
             ImGui::PopID();
-            if ((mi+1) % 8 != 0) ImGui::SameLine(); else ImGui::NewLine();
+            if ((mi + 1) % 8 != 0) ImGui::SameLine(); else ImGui::NewLine();
         }
     }
 
@@ -891,7 +1181,9 @@ void KeyboardEditor::RenderMacroPanel() {
         // Value
         switch (a.type) {
         case MacroActionType::KeyTap:
+            [[fallthrough]];
         case MacroActionType::KeyDown:
+            [[fallthrough]];
         case MacroActionType::KeyUp:
         {
             char kbuf[64]; strncpy_s(kbuf, a.keycode.c_str(), 63);
@@ -1102,7 +1394,8 @@ void KeyboardEditor::RenderLedSchemePanel() {
                 ImGui::PopID();
 
                 ImGui::EndTabItem();
-            } else {
+            }
+            else {
                 ImGui::PopStyleColor(2);
             }
         }
@@ -1121,32 +1414,33 @@ void KeyboardEditor::RenderStatusBar() {
 
     ImGuiWindowFlags flags =
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoMove       | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
         ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNav |
         ImGuiWindowFlags_NoScrollbar;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8,2));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f,0.12f,0.15f,1.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 2));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 1.f));
     ImGui::Begin("##statusbar", nullptr, flags);
 
     if (m_configLoaded) {
         ImGui::Text("Config: %s",
             m_configPath.empty() ? m_config.name.c_str() : m_configPath.c_str());
         ImGui::SameLine();
-        if (m_dirty) ImGui::TextColored(ImVec4(1,0.5f,0.2f,1), " [unsaved]");
-    } else {
+        if (m_dirty) ImGui::TextColored(ImVec4(1, 0.5f, 0.2f, 1), " [unsaved]");
+    }
+    else {
         ImGui::TextDisabled("No config loaded  |  File → Open Config (me.json)");
     }
 
     if (m_layoutLoaded) {
-        ImGui::SameLine(0,20);
+        ImGui::SameLine(0, 20);
         ImGui::TextDisabled("Layout: %s  |  %d keys  |  %d layers",
             m_layout.name.c_str(), (int)m_layout.keys.size(),
             m_config.LayerCount());
     }
 
     if (m_testerActive) {
-        ImGui::SameLine(0,20);
-        ImGui::TextColored(ImVec4(0.3f,0.9f,0.4f,1.f), "● KEY TESTER ACTIVE");
+        ImGui::SameLine(0, 20);
+        ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.f), "● KEY TESTER ACTIVE");
     }
 
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 240.f + ImGui::GetCursorPosX());
@@ -1252,7 +1546,9 @@ void KeyboardEditor::RenderMacroLibraryPanel(MacroEntry& me) {
                 ImGui::Text("Type: %s", LibActionTypeName(e.libType));
                 switch (e.libType) {
                 case LibActionType::KeyTap:
+                    [[fallthrough]];
                 case LibActionType::KeyDown:
+                    [[fallthrough]];
                 case LibActionType::KeyUp:
                     ImGui::Text("Keycode: %s", e.keycode.c_str());
                     break;

@@ -269,33 +269,74 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
             // ── Main menu bar ─────────────────────────────────────────────────
             if (ImGui::BeginMenuBar()) {
+                
+                
+
                 if (ImGui::BeginMenu("File")) {
-                    if (ImGui::MenuItem("Open Design (design.json)", "")) editor.OpenDesign();
-                    if (ImGui::MenuItem("Open Config (me.json)", "Ctrl+O")) editor.OpenConfig();
+                    if (ImGui::MenuItem("Open Design (design.json)", ""))
+                        editor.OpenDesign();
+                    if (ImGui::MenuItem("Open Config (me.json)", "Ctrl+O"))
+                        editor.OpenConfig();
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Save Config", "Ctrl+S", false, editor.CanUndo() || true)) editor.SaveConfig();
-                    if (ImGui::MenuItem("Save Config As…", ""))       editor.SaveConfigAs();
-                    if (ImGui::MenuItem("Save to Keyboard Memory", "Ctrl+Shift+S", false, editor.IsConfigLoaded())) editor.SaveToKeyboard();
+                    if (ImGui::MenuItem("Save Config", "Ctrl+S"))
+                        editor.SaveConfig();
+                    if (ImGui::MenuItem("Save Config As\xe2\x80\xa6", ""))
+                        editor.SaveConfigAs();
+                    ImGui::Separator();
+
+                    // ── Keyboard Device ──────────────────────────────────────
+                    ImGui::TextDisabled("  \xe2\x80\x94 Keyboard Device \xe2\x80\x94");
+                    ImGui::Spacing();
+
+                    // Flash  (Ctrl+Shift+S)
+                    bool canFlash = editor.IsConfigLoaded();
+                    ImGui::BeginDisabled(!canFlash);
+                    if (ImGui::MenuItem("Flash to Keyboard", "Ctrl+Shift+S")) {
+                        editor.FlashToKeyboard();
+                    }
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip(
+                            "Saves me.json then calls:\n"
+                            "  map.exe design.json me.json --yes\n\n"
+                            "Requires: design.json open, config saved/open,\n"
+                            "          map.exe next to the editor.");
+                    }
+                    ImGui::EndDisabled();
+
+                    // Backup
+                    bool canBackup = !editor.IsDesignPathEmpty();
+                    ImGui::BeginDisabled(!canBackup);
+                    if (ImGui::MenuItem("Backup Keyboard \xe2\x86\x92 File", "")) {
+                        editor.BackupKeyboard();
+                    }
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip(
+                            "Reads the keyboard's current keymap and saves\n"
+                            "a timestamped backup (me_backup_DATE.json).\n\n"
+                            "Calls: map.exe design.json --dump");
+                    }
+                    ImGui::EndDisabled();
+
+                    // Restore
+                    ImGui::BeginDisabled(!canBackup);
+                    if (ImGui::MenuItem("Restore Keyboard \xe2\x86\x90 File", "")) {
+                        editor.RestoreKeyboard();
+                    }
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip(
+                            "Opens a file picker, then flashes the chosen\n"
+                            "backup JSON back to the keyboard.\n\n"
+                            "Calls: map.exe design.json --restore chosen.json");
+                    }
+                    ImGui::EndDisabled();
+
                     ImGui::Separator();
                     if (ImGui::MenuItem("Exit")) done = true;
                     ImGui::EndMenu();
                 }
-                if (ImGui::BeginMenu("Edit")) {
-                    if (ImGui::MenuItem("Undo", "Ctrl+Z", false, editor.CanUndo())) editor.Undo();
-                    if (ImGui::MenuItem("Redo", "Ctrl+Y", false, editor.CanRedo())) editor.Redo();
-                    ImGui::Separator();
-                    if (ImGui::MenuItem("Reset Current Layer to Transparent")) editor.ResetCurrentLayer();
-                    ImGui::EndMenu();
-                }
-                if (ImGui::BeginMenu("Help")) {
-                    ImGui::Text("DOIO Keyboard Editor v1.0");
-                    ImGui::Separator();
-                    ImGui::BulletText("Open design.json first (layout)");
-                    ImGui::BulletText("Open me.json (keymaps)");
-                    ImGui::BulletText("Click a key, pick a keycode");
-                    ImGui::BulletText("Ctrl+S to save");
-                    ImGui::EndMenu();
-                }
+
+
+                
                 ImGui::EndMenuBar();
             }
 

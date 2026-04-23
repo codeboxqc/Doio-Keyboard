@@ -20,12 +20,7 @@
 // 
 // ─── Undo / Redo ─────────────────────────────────────────────────────────────
 
-struct UndoRecord {
-    int         layer;
-    int         flatIdx;
-    std::string oldCode;
-    std::string newCode;
-};
+ 
 
 // ─── Macro action ─────────────────────────────────────────────────────────────
 
@@ -61,6 +56,15 @@ struct MacroEntry {
     std::vector<MacroAction>  actions;
 };
 
+enum class MapExeStatus {
+    Idle,
+    Running,
+    Success,
+    Failed,
+    NoMapExe,       // map.exe not found next to .exe
+    NoDesign,       // design.json not loaded
+    NoConfig,       // me.json not loaded/saved
+};
 
 class KeyboardEditor {
 public:
@@ -72,6 +76,18 @@ public:
     void SaveConfig();
     void SaveConfigAs();
     void SaveToKeyboard();
+
+
+    // ── Keyboard device operations (call map.exe) ─────────────────────────────
+    // Flash: saves config then runs:  map.exe design.json me.json --yes
+    void FlashToKeyboard();
+    // Backup: runs:  map.exe design.json --dump   → me_backup_DATE.json
+    void BackupKeyboard();
+    // Restore: open file dialog, then runs:  map.exe design.json chosen.json --yes
+    void RestoreKeyboard();
+
+
+    bool IsDesignPathEmpty() const { return m_designPath.empty(); }
 
     // Edit operations
     bool IsConfigLoaded() const { return m_configLoaded; }
@@ -91,6 +107,7 @@ private:
     bool             m_layoutLoaded = false;
     bool             m_configLoaded = false;
     std::string      m_configPath;
+    std::string      m_designPath;
 
     int  m_currentLayer  = 0;
     int  m_selectedKey   = -1;
@@ -147,6 +164,19 @@ private:
 
     void EnsureLayerSchemes();      // resize vectors to match layer count
     ImU32 KeyFaceColor(int ki) const;  // returns the draw color for key ki
+
+
+    MapExeStatus    m_mapStatus = MapExeStatus::Idle;
+    std::string     m_mapStatusMsg;          // human-readable result / error
+    bool            m_showMapResult = false; // controls the result popup
+    // Launches map.exe with the given argument string, blocks until exit.
+    // Returns the process exit code (0 = success).
+    // Fills m_mapStatusMsg with stdout/stderr output (up to ~4 KB).
+    int  RunMapExe(const std::string& args, std::string& outMsg);
+    // Helper: resolve map.exe path next to the running .exe
+    std::string MapExePath() const;
+    // Render the non-blocking result popup
+    void RenderMapResultPopup();
 
     // ── Sub-panels ────────────────────────────────────────────────────────────
     void RenderLayerPanel();
