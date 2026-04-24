@@ -81,6 +81,9 @@ public:
     void SaveConfigAs();
     void SaveToKeyboard();
 
+    void ReadKeyboardLive();  // Read current keyboard state live
+    void LoadConfigFromFile(const std::string& path);  // Load from backup file
+
 
     // ── Keyboard device operations (call map.exe) ─────────────────────────────
     // Flash: saves config then runs:  map.exe design.json me.json --yes
@@ -112,6 +115,8 @@ private:
     bool             m_configLoaded = false;
     std::string      m_configPath;
     std::string      m_designPath;
+
+    bool m_isElevated = false;
 
     int  m_currentLayer = 0;
     int  m_selectedKey = -1;
@@ -160,6 +165,11 @@ private:
     char                           m_libSearchBuf[128] = {};
     int                            m_libCategoryIdx = 0;
     std::vector<std::string>       m_libCategories;
+
+    
+    std::vector<std::string> m_rawMacros;
+
+
 
     // ── Key Tester ────────────────────────────────────────────────────────────
     KeyTester                  m_keyTester;

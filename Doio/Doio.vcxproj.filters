@@ -39,6 +39,15 @@
     <ClInclude Include="Keytest.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="MacroLibrary.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SessionState.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="AdminHelper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Doio.cpp">

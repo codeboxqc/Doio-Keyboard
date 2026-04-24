@@ -124,6 +124,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="AdminHelper.h" />
     <ClInclude Include="Doio.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="KeyboardConfig.h" />

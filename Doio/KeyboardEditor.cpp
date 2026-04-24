@@ -2,6 +2,7 @@
 #include "SessionState.h"
 #include "KeyboardEditor.h"
 #include "MacroLibrary.h"
+#include "AdminHelper.h"
 #include "doio.h"
 #include "Keytest.h"
 #include "imgui.h"
@@ -117,6 +118,9 @@ static std::string OpenFileDialog(const char* title, const char* filter) {
     return {};
 }
 
+
+
+
 static std::string SaveFileDialog(const char* title, const char* filter,
     const char* defaultExt) {
     char buf[MAX_PATH] = {};
@@ -154,7 +158,47 @@ KeyboardEditor::KeyboardEditor() {
 }
 
 
+void KeyboardEditor::ReadKeyboardLive() {
+    std::string mapExe = MapExePath();
+    if (mapExe.empty()) {
+        m_mapStatus = MapExeStatus::NoMapExe;
+        m_showMapResult = true;
+        return;
+    }
+    if (m_designPath.empty()) {
+        m_mapStatus = MapExeStatus::NoDesign;
+        m_showMapResult = true;
+        return;
+    }
 
+    // Generate temp file for live read
+    char tempPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tempPath);
+    std::string tempFile = std::string(tempPath) + "doio_live_read.json";
+
+    std::string args = "\"" + m_designPath + "\" --dump \"" + tempFile + "\"";
+
+    // Check for admin
+    if (!IsRunningAsAdmin()) {
+        // Ask user to restart as admin
+        int result = MessageBoxA(nullptr,
+            "Flashing requires Administrator privileges.\n\n"
+            "Click OK to restart the editor as Administrator,\n"
+            "or Cancel to continue without flash capability.",
+            "Admin Required", MB_OKCANCEL | MB_ICONWARNING);
+
+        if (result == IDOK) {
+            // Restart as admin
+            char exePath[MAX_PATH];
+            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+            ShellExecuteA(nullptr, "runas", exePath, nullptr, nullptr, SW_SHOWNORMAL);
+            exit(0);
+        }
+        return;
+    }
+
+    LaunchMapExeAsync(args);
+}
 // ════════════════════════════════════════════════════════════════════════════════
 // SECTION 2 – TryAutoLoad  ( 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -327,21 +371,71 @@ void KeyboardEditor::FlashToKeyboard() {
     m_mapStatusMsg.clear();
     m_mapStatus = MapExeStatus::Idle;
     m_showMapResult = false;
-    
-
 
     std::string mapExe = MapExePath();
-    if (mapExe.empty()) { m_mapStatus = MapExeStatus::NoMapExe; m_showMapResult = true; return; }
-    if (m_designPath.empty()) { m_mapStatus = MapExeStatus::NoDesign; m_showMapResult = true; return; }
-    if (!m_configLoaded) { m_mapStatus = MapExeStatus::NoConfig; m_showMapResult = true; return; }
+    if (mapExe.empty()) {
+        m_mapStatus = MapExeStatus::NoMapExe;
+        m_showMapResult = true;
+        return;
+    }
+    if (m_designPath.empty()) {
+        m_mapStatus = MapExeStatus::NoDesign;
+        m_showMapResult = true;
+        return;
+    }
+    if (!m_configLoaded) {
+        m_mapStatus = MapExeStatus::NoConfig;
+        m_showMapResult = true;
+        return;
+    }
+
+    // Check for admin
+    if (!IsRunningAsAdmin()) {
+        int result = MessageBoxA(nullptr,
+            "Flashing requires Administrator privileges.\n\n"
+            "Click OK to restart the editor as Administrator,\n"
+            "or Cancel to continue without flash capability.",
+            "Admin Required", MB_OKCANCEL | MB_ICONWARNING);
+
+        if (result == IDOK) {
+            // Save config first
+            if (!m_configPath.empty())
+                ::SaveConfig(m_configPath, m_config);
+
+            // Restart as admin with flash command
+            char exePath[MAX_PATH];
+            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+            std::string args = "--flash \"" + m_designPath + "\" \"" + m_configPath + "\"";
+            ShellExecuteA(nullptr, "runas", exePath, args.c_str(), nullptr, SW_SHOWNORMAL);
+            exit(0);
+        }
+        return;
+    }
 
     // Save before flash
     if (!m_configPath.empty())
         ::SaveConfig(m_configPath, m_config);
 
-    // Build args then launch async — UI stays live
-    std::string args = "\"" + m_designPath + "\" \"" + m_configPath + "\" --yes";
+    // Build args then launch async
+    std::string args = "\"" + m_designPath + "\" \"" + m_configPath + "\"";
     LaunchMapExeAsync(args);
+}
+
+void KeyboardEditor::LoadConfigFromFile(const std::string& path) {
+    KeyboardConfig tmp;
+    if (LoadConfig(path, m_layout, tmp)) {
+        m_config = std::move(tmp);
+        m_configLoaded = true;
+        m_configPath = path;
+        m_currentLayer = 0;
+        m_selectedKey = -1;
+        m_dirty = false;
+        m_undoStack.clear();
+        m_redoStack.clear();
+        ParseMacrosFromConfig();
+        EnsureLayerSchemes();
+        m_session.SaveConfig(path);
+    }
 }
 
 
@@ -524,50 +618,112 @@ std::string KeyboardEditor::MacroSummary(const MacroEntry& m) const {
 }
 
 void KeyboardEditor::SyncMacrosToConfig() {
-    // Serialize rich macro actions back to the simple string format in config
-    // Format: "KEYDOWN:KC_A | KEYUP:KC_A | TYPE:hello | DELAY:100 | TAP:KC_ENT"
     m_config.macros.resize(m_macros.size());
     for (int i = 0; i < (int)m_macros.size(); ++i) {
-        std::string s;
-        for (const auto& a : m_macros[i].actions) {
-            if (!s.empty()) s += " | ";
-            switch (a.type) {
-            case MacroActionType::KeyTap:
-                s += "TAP:" + a.keycode; break;
-            case MacroActionType::KeyDown:
-                s += "KEYDOWN:" + a.keycode; break;
-            case MacroActionType::KeyUp:
-                s += "KEYUP:" + a.keycode; break;
-            case MacroActionType::TypeString:
-                s += "TYPE:" + a.text; break;
-            case MacroActionType::Delay:
-                s += "DELAY:" + std::to_string(a.delayMs); break;
-            default: break;
+        // Check if this macro should be preserved as raw { } syntax
+        bool shouldPreserveRaw = false;
+        std::string rawMacro;
+
+        // Check current macro actions
+        if (m_macros[i].actions.size() == 1) {
+            const auto& action = m_macros[i].actions[0];
+            if (action.type == MacroActionType::TypeString) {
+                std::string text = action.text;
+                // Check if it contains { } syntax pattern
+                if (text.find('{') != std::string::npos && text.find('}') != std::string::npos) {
+                    shouldPreserveRaw = true;
+                    rawMacro = text;
+                }
             }
         }
-        m_config.macros[i] = s;
+
+        // Also check if we have a raw macro stored from loading (original format)
+        if (!shouldPreserveRaw && i < (int)m_rawMacros.size()) {
+            const std::string& raw = m_rawMacros[i];
+            if (raw.find('{') != std::string::npos && raw.find('}') != std::string::npos &&
+                raw.find("TAP:") == std::string::npos &&
+                raw.find("TYPE:") == std::string::npos) {
+                shouldPreserveRaw = true;
+                rawMacro = raw;
+            }
+        }
+
+        if (shouldPreserveRaw) {
+            // Preserve raw { } syntax exactly as-is
+            m_config.macros[i] = rawMacro;
+        }
+        else {
+            // Serialize to TAP: format for complex macros
+            std::string s;
+            for (const auto& a : m_macros[i].actions) {
+                if (!s.empty()) s += " | ";
+                switch (a.type) {
+                case MacroActionType::KeyTap:
+                    s += "TAP:" + a.keycode; break;
+                case MacroActionType::KeyDown:
+                    s += "KEYDOWN:" + a.keycode; break;
+                case MacroActionType::KeyUp:
+                    s += "KEYUP:" + a.keycode; break;
+                case MacroActionType::TypeString:
+                    // Check if this TypeString contains { } - preserve it raw
+                    if (a.text.find('{') != std::string::npos && a.text.find('}') != std::string::npos) {
+                        s = a.text;  // Replace entire string with raw macro
+                    }
+                    else {
+                        s += "TYPE:" + a.text;
+                    }
+                    break;
+                case MacroActionType::Delay:
+                    s += "DELAY:" + std::to_string(a.delayMs); break;
+                default: break;
+                }
+            }
+            m_config.macros[i] = s;
+        }
     }
 }
 
+
+
 void KeyboardEditor::ParseMacrosFromConfig() {
+    // Store raw macros for preservation
+    m_rawMacros = m_config.macros;
+
     m_macros.resize(m_config.macros.size());
     for (int i = 0; i < (int)m_config.macros.size(); ++i) {
-        char nameBuf[32]; snprintf(nameBuf, sizeof(nameBuf), "MACRO%02d", i);
+        char nameBuf[32];
+        snprintf(nameBuf, sizeof(nameBuf), "MACRO%02d", i);
         m_macros[i].name = nameBuf;
         m_macros[i].actions.clear();
 
         const std::string& raw = m_config.macros[i];
-        // Try to parse our serialised format
-        // Otherwise treat the whole thing as a TypeString action
-        if (raw.find(':') != std::string::npos) {
-            // Split by " | "
+
+        // Check if this is raw { } syntax 
+        // Look for { } pattern and NOT serialized format
+        bool isRawBraceSyntax = (raw.find('{') != std::string::npos &&
+            raw.find('}') != std::string::npos &&
+            raw.find("TAP:") == std::string::npos &&
+            raw.find("TYPE:") == std::string::npos &&
+            raw.find("DELAY:") == std::string::npos &&
+            raw.find("KEYDOWN:") == std::string::npos &&
+            raw.find("KEYUP:") == std::string::npos);
+
+        if (isRawBraceSyntax) {
+            // This is raw { } syntax - store as single TypeString to preserve
+            MacroAction act;
+            act.type = MacroActionType::TypeString;
+            act.text = raw;  // Keep exactly as is: "{KC_A,KC_D}"
+            m_macros[i].actions.push_back(act);
+        }
+        else if (raw.find(':') != std::string::npos) {
+            // Parse serialized format (TAP:KC_A | DELAY:100)
             size_t pos = 0;
             while (pos < raw.size()) {
                 size_t sep = raw.find(" | ", pos);
-                std::string token = raw.substr(pos, sep == std::string::npos
-                    ? std::string::npos
-                    : sep - pos);
+                std::string token = raw.substr(pos, sep == std::string::npos ? std::string::npos : sep - pos);
                 pos = sep == std::string::npos ? raw.size() : sep + 3;
+
+                if (token.empty()) continue;
 
                 MacroAction act;
                 if (token.rfind("TAP:", 0) == 0) {
@@ -590,14 +746,15 @@ void KeyboardEditor::ParseMacrosFromConfig() {
                     act.type = MacroActionType::Delay;
                     act.delayMs = std::stoi(token.substr(6));
                 }
-                else if (!token.empty()) {
+                else {
                     act.type = MacroActionType::TypeString;
                     act.text = token;
                 }
-                if (!token.empty()) m_macros[i].actions.push_back(act);
+                m_macros[i].actions.push_back(act);
             }
         }
         else if (!raw.empty()) {
+            // Plain string - treat as TypeString
             MacroAction act;
             act.type = MacroActionType::TypeString;
             act.text = raw;
@@ -605,7 +762,6 @@ void KeyboardEditor::ParseMacrosFromConfig() {
         }
     }
 }
-
 // ─── LED scheme helpers ───────────────────────────────────────────────────────
 
 void KeyboardEditor::EnsureLayerSchemes() {
@@ -881,6 +1037,7 @@ void KeyboardEditor::Render() {
     // ── Keyboard shortcuts ───────────────────────────────────────────────────
     ImGuiIO& io = ImGui::GetIO();
     if (io.KeyCtrl) {
+       
         if (ImGui::IsKeyPressed(ImGuiKey_Z)) Undo();
         if (ImGui::IsKeyPressed(ImGuiKey_Y)) Redo();
         if (ImGui::IsKeyPressed(ImGuiKey_S)) {
@@ -1607,7 +1764,7 @@ void KeyboardEditor::RenderMacroLibraryPanel(MacroEntry& me) {
             const MacroLibraryEntry& e = *filtered[fi];
             ImGui::TableNextRow();
 
-            // Category cell — colour by category name hash
+            // Category cell
             ImGui::TableSetColumnIndex(0);
             float hue = 0.f;
             for (size_t k = 0; k < e.category.size(); ++k)
@@ -1618,7 +1775,7 @@ void KeyboardEditor::RenderMacroLibraryPanel(MacroEntry& me) {
             catCol.w = 1.f;
             ImGui::TextColored(catCol, "%s", e.category.c_str());
 
-            // Action name (selectable spans all columns for hover / dbl-click)
+            // Action name
             ImGui::TableSetColumnIndex(1);
             ImGui::PushID(fi);
             bool clicked = ImGui::Selectable(
@@ -1635,9 +1792,7 @@ void KeyboardEditor::RenderMacroLibraryPanel(MacroEntry& me) {
                 ImGui::Text("Type: %s", LibActionTypeName(e.libType));
                 switch (e.libType) {
                 case LibActionType::KeyTap:
-                    [[fallthrough]];
                 case LibActionType::KeyDown:
-                    [[fallthrough]];
                 case LibActionType::KeyUp:
                     ImGui::Text("Keycode: %s", e.keycode.c_str());
                     break;
@@ -1672,24 +1827,25 @@ void KeyboardEditor::RenderMacroLibraryPanel(MacroEntry& me) {
                 MacroAction a;
                 switch (e.libType) {
                 case LibActionType::KeyTap:
-                    a.type = MacroActionType::KeyTap;
-                    a.keycode = e.keycode;
+                    a.type = MacroActionType::TypeString;  // Changed from KeyTap to TypeString
+                    // Convert to { } syntax for keyboard
+                    a.text = "{" + e.keycode + "}";
                     break;
                 case LibActionType::KeyDown:
-                    a.type = MacroActionType::KeyDown;
-                    a.keycode = e.keycode;
+                    a.type = MacroActionType::TypeString;
+                    a.text = "{" + e.keycode + "}";
                     break;
                 case LibActionType::KeyUp:
-                    a.type = MacroActionType::KeyUp;
-                    a.keycode = e.keycode;
+                    a.type = MacroActionType::TypeString;
+                    a.text = "{" + e.keycode + "}";
                     break;
                 case LibActionType::TypeString:
                     a.type = MacroActionType::TypeString;
                     a.text = e.text;
                     break;
                 case LibActionType::Delay:
-                    a.type = MacroActionType::Delay;
-                    a.delayMs = e.delayMs;
+                    a.type = MacroActionType::TypeString;
+                    a.text = "${" + std::to_string(e.delayMs) + "}";
                     break;
                 default: break;
                 }
